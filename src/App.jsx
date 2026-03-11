@@ -53,17 +53,17 @@ export default function App() {
   const [catForm, setCatForm] = useState(EMPTY_CAT_FORM);
 
   // 認証状態を監視
-useEffect(() => {
-  getRedirectResult(auth)
-    .then((result) => {
-      if (result?.user) setUser(result.user);
-    })
-    .catch(console.error);
-  const unsub = onAuthStateChanged(auth, (u) => {
-    setUser(u ?? null); // nullも含めて必ずセットする
-  });
-  return unsub;
-}, []);
+  useEffect(() => {
+    getRedirectResult(auth)
+      .then((result) => {
+        if (result?.user) setUser(result.user);
+      })
+      .catch(console.error);
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setUser(u ?? null); // nullも含めて必ずセットする
+    });
+    return unsub;
+  }, []);
 
   // Firestore からリアルタイムでデータ取得
   useEffect(() => {
@@ -85,7 +85,7 @@ useEffect(() => {
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 1800); };
 
-const login = () => signInWithPopup(auth, googleProvider).catch(console.error);
+  const login = () => signInWithPopup(auth, googleProvider).catch(console.error);
   const logout = () => signOut(auth);
 
   // 費用の保存・更新・削除
@@ -143,9 +143,11 @@ const login = () => signInWithPopup(auth, googleProvider).catch(console.error);
   const openAddCat = () => { setEditingCatId(null); setCatForm(EMPTY_CAT_FORM); setShowCatForm(true); };
   const openEditCat = (c) => { setEditingCatId(c.id); setCatForm({ label: c.label, emoji: c.emoji, color: c.color }); setShowCatForm(true); };
 
+  const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
   const cat = (id) => categories.find(c => c.id === id) || { emoji: "✦", label: "不明", color: "#888" };
   const filtered = filterCat === "all" ? expenses : expenses.filter(e => e.category === filterCat);
-  const total = expenses.reduce((s, e) => s + e.amount, 0);
+  const monthlyExpenses = expenses.filter(e => e.date.slice(0, 7) === selectedMonth);
+  const total = monthlyExpenses.reduce((s, e) => s + e.amount, 0);
   const byCategory = categories.map(c => ({
     ...c, total: expenses.filter(e => e.category === c.id).reduce((s, e) => s + e.amount, 0),
   })).filter(c => c.total > 0).sort((a, b) => b.total - a.total);
@@ -241,7 +243,18 @@ const login = () => signInWithPopup(auth, googleProvider).catch(console.error);
               <div style={{ fontSize: 12, color: "#9A8E86", marginTop: 6, fontWeight: 500, letterSpacing: "0.04em" }}>ふたりの思い出帳</div>
             </div>
             <div style={{ textAlign: "right" }}>
-              <div style={{ fontSize: 11, color: "#9A8E86", fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 4 }}>Total</div>
+              <div style={{ fontSize: 11, color: "#9A8E86", fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 4 }}>Monthly Total</div>
+              <select
+                value={selectedMonth}
+                onChange={e => setSelectedMonth(e.target.value)}
+                style={{ background: "none", border: "none", fontSize: 11, color: "#9A8E86", fontFamily: "DM Sans", cursor: "pointer", marginBottom: 2, padding: 0 }}
+              >
+                {[...new Set(expenses.map(e => e.date.slice(0, 7)))].sort((a, b) => b.localeCompare(a)).concat(
+                  [new Date().toISOString().slice(0, 7)]
+                ).filter((v, i, a) => a.indexOf(v) === i).sort((a, b) => b.localeCompare(a)).map(m => (
+                  <option key={m} value={m}>{m.replace("-", "年") + "月"}</option>
+                ))}
+              </select>
               <div style={{ fontFamily: "DM Serif Display", fontSize: 30, color: "#2C2420" }}>{fmt(total)}</div>
               <button onClick={logout} style={{ background: "none", border: "none", fontSize: 11, color: "#B8B0A8", cursor: "pointer", marginTop: 4, fontFamily: "DM Sans" }}>
                 ログアウト
