@@ -3,7 +3,7 @@ import {
   collection, doc, setDoc, deleteDoc,
   onSnapshot, query, orderBy
 } from "firebase/firestore";
-import { signInWithPopup, signOut, onAuthStateChanged } from "firebase/auth";
+import { signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged } from "firebase/auth";
 import { db, auth, googleProvider } from "./firebase";
 
 const DEFAULT_CATEGORIES = [
@@ -18,17 +18,17 @@ const DEFAULT_CATEGORIES = [
 ];
 
 const PALETTE = [
-  "#C4785A","#A0845C","#6B7FA3","#7A9E7E","#8E7AAB",
-  "#A07A8E","#B8965A","#888888","#5A8C9E","#9E5A6B",
-  "#6B9E5A","#9E855A","#5A6B9E","#9E5A85","#5A9E8C",
+  "#C4785A", "#A0845C", "#6B7FA3", "#7A9E7E", "#8E7AAB",
+  "#A07A8E", "#B8965A", "#888888", "#5A8C9E", "#9E5A6B",
+  "#6B9E5A", "#9E855A", "#5A6B9E", "#9E5A85", "#5A9E8C",
 ];
 
 const EMOJI_GROUPS = [
-  { label: "食べ物・飲み物", emojis: ["🍽","🍜","🍣","🍱","🍕","🍔","🌮","🥗","🍩","🍰","🎂","🍦","🧁","☕","🧋","🍵","🍺","🍷","🥂","🍸","🧃","🍹"] },
-  { label: "おでかけ・旅行", emojis: ["🚃","✈️","🚗","🚢","🏨","🏖","🏔","⛺","🗼","🏯","🌏","🗺","🚁","🚂","🛳","🚴","🛺","🗽","🌅","🎡","🎢","🎠"] },
-  { label: "スポーツ・趣味", emojis: ["🏋","⚽","🎾","🏊","🎿","🎯","🎱","♟","🏄","🧗","🤸","🎳","🎸","🎹","🎨","📸","🎤","🎵","🎮","🕹","🎲","📚","✏️","🧩"] },
-  { label: "ショッピング・ファッション", emojis: ["🛍","👗","👠","👟","👜","💄","💍","⌚","🕶","🧴","🌂","🛒","💎","🪞","👒","🧣","🧤","💅","🪮","🪭"] },
-  { label: "その他", emojis: ["✦","🌸","🌙","🌟","💝","🐾","🐶","🐱","🌿","🌺","🎁","💆","🧸","🏡","🎉","🩺","💊","📱","💻","🔑","🧧","🪴"] },
+  { label: "食べ物・飲み物", emojis: ["🍽", "🍜", "🍣", "🍱", "🍕", "🍔", "🌮", "🥗", "🍩", "🍰", "🎂", "🍦", "🧁", "☕", "🧋", "🍵", "🍺", "🍷", "🥂", "🍸", "🧃", "🍹"] },
+  { label: "おでかけ・旅行", emojis: ["🚃", "✈️", "🚗", "🚢", "🏨", "🏖", "🏔", "⛺", "🗼", "🏯", "🌏", "🗺", "🚁", "🚂", "🛳", "🚴", "🛺", "🗽", "🌅", "🎡", "🎢", "🎠"] },
+  { label: "スポーツ・趣味", emojis: ["🏋", "⚽", "🎾", "🏊", "🎿", "🎯", "🎱", "♟", "🏄", "🧗", "🤸", "🎳", "🎸", "🎹", "🎨", "📸", "🎤", "🎵", "🎮", "🕹", "🎲", "📚", "✏️", "🧩"] },
+  { label: "ショッピング・ファッション", emojis: ["🛍", "👗", "👠", "👟", "👜", "💄", "💍", "⌚", "🕶", "🧴", "🌂", "🛒", "💎", "🪞", "👒", "🧣", "🧤", "💅", "🪮", "🪭"] },
+  { label: "その他", emojis: ["✦", "🌸", "🌙", "🌟", "💝", "🐾", "🐶", "🐱", "🌿", "🌺", "🎁", "💆", "🧸", "🏡", "🎉", "🩺", "💊", "📱", "💻", "🔑", "🧧", "🪴"] },
 ];
 
 const fmt = (n) => "¥" + Number(n).toLocaleString("ja-JP");
@@ -54,6 +54,7 @@ export default function App() {
 
   // 認証状態を監視
   useEffect(() => {
+    getRedirectResult(auth).catch(console.error);
     const unsub = onAuthStateChanged(auth, (u) => setUser(u));
     return unsub;
   }, []);
@@ -78,7 +79,7 @@ export default function App() {
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 1800); };
 
-  const login = () => signInWithPopup(auth, googleProvider).catch(console.error);
+  const login = () => signInWithRedirect(auth, googleProvider).catch(console.error);
   const logout = () => signOut(auth);
 
   // 費用の保存・更新・削除
@@ -180,7 +181,7 @@ export default function App() {
             padding: "14px 28px", cursor: "pointer", fontFamily: "DM Sans", fontWeight: 600, fontSize: 15, color: "#2C2420",
             boxShadow: "0 2px 12px rgba(44,36,32,0.1)",
           }}>
-            <svg width="20" height="20" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20H24v8h11.3C33.6 33.2 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3 0 5.7 1.1 7.8 2.9l5.7-5.7C34 6.5 29.3 4.5 24 4.5 13.2 4.5 4.5 13.2 4.5 24S13.2 43.5 24 43.5c10.8 0 20-8.7 20-20 0-1.2-.1-2.3-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.5 15.1 18.9 12 24 12c3 0 5.7 1.1 7.8 2.9l5.7-5.7C34 6.5 29.3 4.5 24 4.5c-7.7 0-14.3 4.3-17.7 10.2z"/><path fill="#4CAF50" d="M24 43.5c5.2 0 9.9-1.9 13.4-5l-6.2-5.2C29.4 34.9 26.8 36 24 36c-5.2 0-9.6-3.4-11.2-8.1l-6.5 5C9.6 39.1 16.3 43.5 24 43.5z"/><path fill="#1976D2" d="M43.6 20H24v8h11.3c-.8 2.3-2.4 4.3-4.5 5.7l6.2 5.2C41.4 36 44 30.4 44 24c0-1.2-.1-2.3-.4-3.5z"/></svg>
+            <svg width="20" height="20" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20H24v8h11.3C33.6 33.2 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3 0 5.7 1.1 7.8 2.9l5.7-5.7C34 6.5 29.3 4.5 24 4.5 13.2 4.5 4.5 13.2 4.5 24S13.2 43.5 24 43.5c10.8 0 20-8.7 20-20 0-1.2-.1-2.3-.4-3.5z" /><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.5 15.1 18.9 12 24 12c3 0 5.7 1.1 7.8 2.9l5.7-5.7C34 6.5 29.3 4.5 24 4.5c-7.7 0-14.3 4.3-17.7 10.2z" /><path fill="#4CAF50" d="M24 43.5c5.2 0 9.9-1.9 13.4-5l-6.2-5.2C29.4 34.9 26.8 36 24 36c-5.2 0-9.6-3.4-11.2-8.1l-6.5 5C9.6 39.1 16.3 43.5 24 43.5z" /><path fill="#1976D2" d="M43.6 20H24v8h11.3c-.8 2.3-2.4 4.3-4.5 5.7l6.2 5.2C41.4 36 44 30.4 44 24c0-1.2-.1-2.3-.4-3.5z" /></svg>
             Googleでログイン
           </button>
           <div style={{ fontSize: 12, color: "#B8B0A8", marginTop: 20, fontFamily: "DM Sans", textAlign: "center", lineHeight: 1.7 }}>
