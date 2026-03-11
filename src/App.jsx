@@ -3,7 +3,7 @@ import {
   collection, doc, setDoc, deleteDoc,
   onSnapshot, query, orderBy
 } from "firebase/firestore";
-import { signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged } from "firebase/auth";
+import { signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged } from "firebase/auth";
 import { db, auth, googleProvider } from "./firebase";
 
 const DEFAULT_CATEGORIES = [
@@ -60,7 +60,7 @@ useEffect(() => {
     })
     .catch(console.error);
   const unsub = onAuthStateChanged(auth, (u) => {
-    if (u) setUser(u);
+    setUser(u ?? null); // nullも含めて必ずセットする
   });
   return unsub;
 }, []);
@@ -85,7 +85,7 @@ useEffect(() => {
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 1800); };
 
-  const login = () => {
+const login = () => {
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
   if (isIOS) {
     signInWithRedirect(auth, googleProvider).catch(console.error);
