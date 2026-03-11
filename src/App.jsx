@@ -149,7 +149,7 @@ export default function App() {
   const monthlyExpenses = expenses.filter(e => e.date.slice(0, 7) === selectedMonth);
   const total = monthlyExpenses.reduce((s, e) => s + e.amount, 0);
   const byCategory = categories.map(c => ({
-    ...c, total: expenses.filter(e => e.category === c.id).reduce((s, e) => s + e.amount, 0),
+    ...c, total: monthlyExpenses.filter(e => e.category === c.id).reduce((s, e) => s + e.amount, 0),
   })).filter(c => c.total > 0).sort((a, b) => b.total - a.total);
   const grouped = filtered.reduce((acc, e) => {
     const m = e.date.slice(0, 7);
@@ -182,7 +182,7 @@ export default function App() {
           <div style={{ fontFamily: "DM Serif Display", fontSize: 36, color: "#2C2420", lineHeight: 1.2, textAlign: "center", marginBottom: 8 }}>
             Date<br /><em style={{ color: "#B5755A" }}>Wallet</em>
           </div>
-          <div style={{ fontSize: 13, color: "#9A8E86", marginBottom: 40, fontFamily: "DM Sans" }}>ふたりの思い出帳</div>
+          <div style={{ fontSize: 13, color: "#9A8E86", marginBottom: 40, fontFamily: "DM Sans" }}>デート家計簿</div>
           <button onClick={login} style={{
             display: "flex", alignItems: "center", gap: 12,
             background: "#fff", border: "1.5px solid #E8E0D8", borderRadius: 14,
@@ -240,7 +240,7 @@ export default function App() {
               <div style={{ fontFamily: "DM Serif Display", fontSize: 28, color: "#2C2420", lineHeight: 1.15 }}>
                 Date<br /><em style={{ color: "#B5755A" }}>Wallet</em>
               </div>
-              <div style={{ fontSize: 12, color: "#9A8E86", marginTop: 6, fontWeight: 500, letterSpacing: "0.04em" }}>ふたりの思い出帳</div>
+              <div style={{ fontSize: 12, color: "#9A8E86", marginTop: 6, fontWeight: 500, letterSpacing: "0.04em" }}>デート家計簿</div>
             </div>
             <div style={{ textAlign: "right" }}>
               <div style={{ fontSize: 11, color: "#9A8E86", fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 4 }}>Monthly Total</div>
@@ -375,7 +375,7 @@ export default function App() {
                 ))}
                 <div style={{ marginTop: 20, background: "#F0E6DF", borderRadius: 16, padding: "20px", border: "1px solid rgba(181,117,90,0.2)" }}>
                   <div style={{ fontFamily: "DM Serif Display", fontSize: 16, color: "#B5755A", marginBottom: 14 }}>Summary</div>
-                  {[["合計件数", `${expenses.length} 件`], ["合計金額", fmt(total)], ...(expenses.length > 0 ? [["1回あたり平均", fmt(Math.round(total / expenses.length))]] : [])].map(([k, v], i, arr) => (
+                  {[["合計件数", `${monthlyExpenses.length} 件`], ["合計金額", fmt(total)], ...(monthlyExpenses.length > 0 ? [["1回あたり平均", fmt(Math.round(total / monthlyExpenses.length))]] : [])].map(([k, v], i, arr) => (
                     <div key={k}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0" }}>
                         <div style={{ fontSize: 13, color: "#9A8E86", fontWeight: 500 }}>{k}</div>
