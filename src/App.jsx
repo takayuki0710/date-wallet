@@ -59,7 +59,9 @@ useEffect(() => {
       if (result?.user) setUser(result.user);
     })
     .catch(console.error);
-  const unsub = onAuthStateChanged(auth, (u) => setUser(u));
+  const unsub = onAuthStateChanged(auth, (u) => {
+    if (u) setUser(u);
+  });
   return unsub;
 }, []);
 
@@ -83,7 +85,14 @@ useEffect(() => {
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 1800); };
 
-  const login = () => signInWithRedirect(auth, googleProvider).catch(console.error);
+  const login = () => {
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+  if (isIOS) {
+    signInWithRedirect(auth, googleProvider).catch(console.error);
+  } else {
+    signInWithPopup(auth, googleProvider).catch(console.error);
+  }
+};
   const logout = () => signOut(auth);
 
   // 費用の保存・更新・削除
