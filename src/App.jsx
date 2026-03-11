@@ -85,14 +85,7 @@ useEffect(() => {
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 1800); };
 
-const login = () => {
-  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-  if (isIOS) {
-    signInWithRedirect(auth, googleProvider).catch(console.error);
-  } else {
-    signInWithPopup(auth, googleProvider).catch(console.error);
-  }
-};
+const login = () => signInWithPopup(auth, googleProvider).catch(console.error);
   const logout = () => signOut(auth);
 
   // 費用の保存・更新・削除
