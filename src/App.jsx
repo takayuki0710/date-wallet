@@ -53,11 +53,15 @@ export default function App() {
   const [catForm, setCatForm] = useState(EMPTY_CAT_FORM);
 
   // 認証状態を監視
-  useEffect(() => {
-    getRedirectResult(auth).catch(console.error);
-    const unsub = onAuthStateChanged(auth, (u) => setUser(u));
-    return unsub;
-  }, []);
+useEffect(() => {
+  getRedirectResult(auth)
+    .then((result) => {
+      if (result?.user) setUser(result.user);
+    })
+    .catch(console.error);
+  const unsub = onAuthStateChanged(auth, (u) => setUser(u));
+  return unsub;
+}, []);
 
   // Firestore からリアルタイムでデータ取得
   useEffect(() => {
