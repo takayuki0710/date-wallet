@@ -148,9 +148,10 @@ export default function App() {
   const filtered = filterCat === "all" ? expenses : expenses.filter(e => e.category === filterCat);
   const monthlyExpenses = expenses.filter(e => e.date.slice(0, 7) === selectedMonth);
   const total = monthlyExpenses.reduce((s, e) => s + e.amount, 0);
-  const byCategory = categories.map(c => ({
-    ...c, total: monthlyExpenses.filter(e => e.category === c.id).reduce((s, e) => s + e.amount, 0),
-  })).filter(c => c.total > 0).sort((a, b) => b.total - a.total);
+  const byCategory = categories.map(c => {
+    const items = monthlyExpenses.filter(e => e.category === c.id);
+    return { ...c, total: items.reduce((s, e) => s + e.amount, 0), count: items.length };
+  }).filter(c => c.total > 0).sort((a, b) => b.total - a.total);
   const grouped = filtered.reduce((acc, e) => {
     const m = e.date.slice(0, 7);
     if (!acc[m]) acc[m] = [];
@@ -362,6 +363,7 @@ export default function App() {
                       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                         <span style={{ fontSize: 16 }}>{c.emoji}</span>
                         <span style={{ fontWeight: 600, fontSize: 14, color: "#2C2420" }}>{c.label}</span>
+                        <span style={{ fontSize: 12, color: "#9A8E86", marginLeft: 6 }}>{c.count}件</span>
                       </div>
                       <div>
                         <span style={{ fontFamily: "DM Serif Display", fontSize: 18, color: "#2C2420" }}>{fmt(c.total)}</span>
