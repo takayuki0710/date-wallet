@@ -32,7 +32,7 @@ const EMOJI_GROUPS = [
 ];
 
 const fmt = (n) => "¥" + Number(n).toLocaleString("ja-JP");
-const EMPTY_FORM = { title: "", amount: "", category: "food", memo: "", date: new Date().toISOString().slice(0, 10) };
+const EMPTY_FORM = { title: "", amount: "", category: "food", memo: "", date: new Date().toISOString().slice(0, 10), type: "expense" };
 const EMPTY_CAT_FORM = { label: "", emoji: "🍽", color: "#C4785A" };
 
 // Firestore のコレクション名（二人で共有する固定ID）
@@ -137,7 +137,7 @@ export default function App() {
   const openAdd = () => { setEditingId(null); setForm(EMPTY_FORM); setShowForm(true); };
   const openEdit = (e) => {
     setEditingId(e.id);
-    setForm({ title: e.title, amount: String(e.amount), category: e.category, memo: e.memo || "", date: e.date });
+    setForm({ title: e.title, amount: String(e.amount), category: e.category, memo: e.memo || "", date: e.date, type: e.type || "expense" });
     setShowForm(true);
   };
   const openAddCat = () => { setEditingCatId(null); setCatForm(EMPTY_CAT_FORM); setShowCatForm(true); };
@@ -146,8 +146,14 @@ export default function App() {
   const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
   const cat = (id) => categories.find(c => c.id === id) || { emoji: "✦", label: "不明", color: "#888" };
   const filtered = filterCat === "all" ? expenses : expenses.filter(e => e.category === filterCat);
-  const monthlyExpenses = expenses.filter(e => e.date.slice(0, 7) === selectedMonth);
+  const monthlyAll = expenses.filter(e => e.date.slice(0, 7) === selectedMonth);
+  const monthlyExpenses = monthlyAll.filter(e => (e.type || "expense") === "expense");
+  const monthlyIncome = monthlyAll.filter(e => e.type === "income");
   const total = monthlyExpenses.reduce((s, e) => s + e.amount, 0);
+  const totalIncome = monthlyIncome.reduce((s, e) => s + e.amount, 0);
+  const allTimeExpense = expenses.filter(e => (e.type || "expense") === "expense").reduce((s, e) => s + e.amount, 0);
+  const allTimeIncome = expenses.filter(e => e.type === "income").reduce((s, e) => s + e.amount, 0);
+  const walletBalance = allTimeIncome - allTimeExpense;
   const byCategory = categories.map(c => {
     const items = monthlyExpenses.filter(e => e.category === c.id);
     return { ...c, total: items.reduce((s, e) => s + e.amount, 0), count: items.length };
@@ -232,11 +238,12 @@ export default function App() {
         }}>{toast}</div>
       )}
 
-      <div style={{ maxWidth: 430, margin: "0 auto", minHeight: "100vh", background: "#F7F3EE", paddingBottom: 100 }}>
+<div style={{ maxWidth: 430, margin: "0 auto", minHeight: "100vh", background: "#F7F3EE", paddingBottom: 100 }}>
 
         {/* Header */}
-        <div style={{ padding: "36px 24px 24px", borderBottom: "1px solid #E8E0D8" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div style={{ padding: "36px 24px 20px", borderBottom: "1px solid #E8E0D8" }}>
+          {/* ロゴ ＋ 月次合計（元のレイアウト） */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
             <div>
               <div style={{ fontFamily: "DM Serif Display", fontSize: 28, color: "#2C2420", lineHeight: 1.15 }}>
                 Date<br /><em style={{ color: "#B5755A" }}>Wallet</em>
@@ -257,9 +264,14 @@ export default function App() {
                 ))}
               </select>
               <div style={{ fontFamily: "DM Serif Display", fontSize: 30, color: "#2C2420" }}>{fmt(total)}</div>
-              <button onClick={logout} style={{ background: "none", border: "none", fontSize: 11, color: "#B8B0A8", cursor: "pointer", marginTop: 4, fontFamily: "DM Sans" }}>
-                ログアウト
-              </button>
+            </div>
+          </div>
+
+          {/* 財布残高 */}
+          <div style={{ borderTop: "1px solid #E8E0D8", paddingTop: 16, display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+            <div style={{ fontSize: 12, color: "#9A8E86", fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase" }}>Wallet Balance</div>
+            <div style={{ fontFamily: "DM Serif Display", fontSize: 26, color: walletBalance >= 0 ? "#2C2420" : "#C4785A" }}>
+              {walletBalance < 0 && <span style={{ fontSize: 18 }}>−</span>}{fmt(Math.abs(walletBalance))}
             </div>
           </div>
         </div>
@@ -311,23 +323,26 @@ export default function App() {
                   <div key={month}>
                     <div style={{ padding: "10px 20px 6px", fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", color: "#9A8E86", textTransform: "uppercase", display: "flex", justifyContent: "space-between" }}>
                       <span>{month.replace("-", "年") + "月"}</span>
-                      <span>{fmt(items.reduce((s, e) => s + e.amount, 0))}</span>
+                      <span>{fmt(items.filter(e => (e.type || "expense") === "expense").reduce((s, e) => s + e.amount, 0))}</span>
                     </div>
                     {items.map((e, i) => (
                       <div key={e.id} className="fade-in" style={{ margin: "0 12px 6px", background: "#fff", borderRadius: 14, padding: "14px 16px", border: "1px solid #E8E0D8", display: "flex", alignItems: "center", gap: 14, animationDelay: `${i * 0.04}s` }}>
-                        <div style={{ width: 40, height: 40, borderRadius: 12, flexShrink: 0, background: `${cat(e.category)?.color}18`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>
-                          {cat(e.category)?.emoji}
+                        <div style={{ width: 40, height: 40, borderRadius: 12, flexShrink: 0, background: e.type === "income" ? "#6B9E5A18" : `${cat(e.category)?.color}18`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>
+                          {e.type === "income" ? "💰" : cat(e.category)?.emoji}
                         </div>
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ fontWeight: 600, fontSize: 15, color: "#2C2420", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.title}</div>
                           <div style={{ fontSize: 12, color: "#9A8E86", marginTop: 2, display: "flex", gap: 8, flexWrap: "wrap" }}>
                             <span>{e.date.slice(5).replace("-", "/")}</span>
-                            <span style={{ color: cat(e.category)?.color, fontWeight: 500 }}>{cat(e.category)?.label}</span>
+                            {e.type !== "income" && <span style={{ color: cat(e.category)?.color, fontWeight: 500 }}>{cat(e.category)?.label}</span>}
+                            {e.type === "income" && <span style={{ color: "#6B9E5A", fontWeight: 500 }}>入金</span>}
                             {e.memo && <span>— {e.memo}</span>}
                           </div>
                         </div>
                         <div style={{ textAlign: "right", flexShrink: 0 }}>
-                          <div style={{ fontFamily: "DM Serif Display", fontSize: 17, color: "#2C2420" }}>{fmt(e.amount)}</div>
+                          <div style={{ fontFamily: "DM Serif Display", fontSize: 17, color: e.type === "income" ? "#6B9E5A" : "#2C2420" }}>
+                            {e.type === "income" ? "+" : ""}{fmt(e.amount)}
+                          </div>
                           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
                             <button className="row-btn" style={{ color: "#B5755A" }} onClick={() => openEdit(e)}>編集</button>
                             <span style={{ color: "#E8E0D8", fontSize: 12 }}>|</span>
@@ -377,7 +392,11 @@ export default function App() {
                 ))}
                 <div style={{ marginTop: 20, background: "#F0E6DF", borderRadius: 16, padding: "20px", border: "1px solid rgba(181,117,90,0.2)" }}>
                   <div style={{ fontFamily: "DM Serif Display", fontSize: 16, color: "#B5755A", marginBottom: 14 }}>Summary</div>
-                  {[["合計件数", `${monthlyExpenses.length} 件`], ["合計金額", fmt(total)], ...(monthlyExpenses.length > 0 ? [["1回あたり平均", fmt(Math.round(total / monthlyExpenses.length))]] : [])].map(([k, v], i, arr) => (
+                  {[
+                    ["合計件数", `${monthlyExpenses.length} 件`],
+                    ["合計金額", fmt(total)],
+                    ...(monthlyExpenses.length > 0 ? [["1回あたり平均", fmt(Math.round(total / monthlyExpenses.length))]] : []),
+                  ].map(([k, v], i, arr) => (
                     <div key={k}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0" }}>
                         <div style={{ fontSize: 13, color: "#9A8E86", fontWeight: 500 }}>{k}</div>
@@ -437,7 +456,7 @@ export default function App() {
             display: "flex", alignItems: "center", gap: 8, whiteSpace: "nowrap",
             maxWidth: 400, width: "calc(100% - 40px)",
           }}>
-            <span style={{ fontSize: 18, lineHeight: 1 }}>+</span> 費用を記録する
+            <span style={{ fontSize: 18, lineHeight: 1 }}>+</span> 記録する
           </button>
         )}
 
@@ -448,9 +467,19 @@ export default function App() {
             <div className="sheet" style={{ background: "#fff", borderRadius: "24px 24px 0 0", padding: "28px 20px 44px", width: "100%", maxWidth: 430, boxShadow: "0 -8px 40px rgba(44,36,32,0.12)" }}>
               <div style={{ width: 36, height: 4, background: "#E8E0D8", borderRadius: 2, margin: "0 auto 24px" }} />
               <div style={{ fontFamily: "DM Serif Display", fontSize: 22, color: "#2C2420", marginBottom: 22 }}>
-                {editingId ? <>記録を<em style={{ color: "#B5755A" }}>編集</em></> : <>新しい<em style={{ color: "#B5755A" }}>記録</em></>}
+                {editingId ? <>記録を<em style={{ color: "#B5755A" }}>編集</em></> : form.type === "income" ? <>入金を<em style={{ color: "#6B9E5A" }}>記録</em></> : <>新しい<em style={{ color: "#B5755A" }}>記録</em></>}
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                <div style={{ display: "flex", background: "#F7F3EE", borderRadius: 10, padding: 4 }}>
+                  {[["expense", "支出"], ["income", "入金"]].map(([val, label]) => (
+                    <button key={val} onClick={() => setForm({ ...form, type: val })} style={{
+                      flex: 1, padding: "9px", border: "none", borderRadius: 8, cursor: "pointer",
+                      fontFamily: "DM Sans", fontWeight: 600, fontSize: 14, transition: "all 0.2s",
+                      background: form.type === val ? (val === "income" ? "#6B9E5A" : "#2C2420") : "transparent",
+                      color: form.type === val ? "#fff" : "#9A8E86",
+                    }}>{label}</button>
+                  ))}
+                </div>
                 <div>
                   <label style={S.label}>金額（円）<span style={{ color: "#C4785A" }}>*</span></label>
                   <input style={S.input} type="number" placeholder="0" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} autoFocus />
@@ -460,12 +489,14 @@ export default function App() {
                   <input style={S.input} placeholder="例：ランチ" value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} />
                 </div>
                 <div style={{ display: "flex", gap: 12 }}>
-                  <div style={{ flex: 1 }}>
-                    <label style={S.label}>カテゴリ</label>
-                    <select style={S.input} value={form.category} onChange={e => setForm({ ...form, category: e.target.value })}>
-                      {categories.map(c => <option key={c.id} value={c.id}>{c.emoji} {c.label}</option>)}
-                    </select>
-                  </div>
+                  {form.type !== "income" && (
+                    <div style={{ flex: 1 }}>
+                      <label style={S.label}>カテゴリ</label>
+                      <select style={S.input} value={form.category} onChange={e => setForm({ ...form, category: e.target.value })}>
+                        {categories.map(c => <option key={c.id} value={c.id}>{c.emoji} {c.label}</option>)}
+                      </select>
+                    </div>
+                  )}
                   <div style={{ flex: 1 }}>
                     <label style={S.label}>日付</label>
                     <input style={S.input} type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} />
