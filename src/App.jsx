@@ -482,7 +482,7 @@ export default function App() {
                 </div>
                 <div>
                   <label style={S.label}>金額（円）<span style={{ color: "#C4785A" }}>*</span></label>
-                  <input style={S.input} type="number" placeholder="0" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} autoFocus />
+                  <input style={S.input} type="text" inputMode="numeric" pattern="[0-9]*" placeholder="0" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value.replace(/[^0-9]/g, '') })} autoFocus />
                 </div>
                 <div>
                   <label style={S.label}>タイトル <span style={{ color: "#C8C0B8", fontWeight: 400, textTransform: "none", fontSize: 11 }}>— 空欄だと金額が入ります</span></label>
