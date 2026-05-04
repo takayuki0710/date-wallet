@@ -51,6 +51,7 @@ export default function App() {
   const [showCatForm, setShowCatForm] = useState(false);
   const [editingCatId, setEditingCatId] = useState(null);
   const [catForm, setCatForm] = useState(EMPTY_CAT_FORM);
+  const [confirmDialog, setConfirmDialog] = useState(null);
 
   // 認証状態を監視
   useEffect(() => {
@@ -107,6 +108,30 @@ export default function App() {
   const delExpense = async (id) => {
     await deleteDoc(doc(db, "expenses", id));
     showToast("削除しました");
+  };
+
+  const askDeleteExpense = (e) => {
+    setConfirmDialog({
+      kind: "expense",
+      title: "この記録を削除しますか？",
+      body: e.title,
+      sub: `${e.date.slice(5).replace("-", "/")}・${e.type === "income" ? "入金" : cat(e.category)?.label} ・ ${e.type === "income" ? "+" : ""}${fmt(e.amount)}`,
+      onConfirm: () => delExpense(e.id),
+    });
+  };
+
+  const askDeleteCategory = (c) => {
+    if (expenses.some(e => e.category === c.id)) {
+      showToast("使用中のカテゴリは削除できません");
+      return;
+    }
+    setConfirmDialog({
+      kind: "category",
+      title: "このカテゴリを削除しますか？",
+      body: `${c.emoji} ${c.label}`,
+      sub: "未使用のため削除可能です",
+      onConfirm: () => delCategory(c.id),
+    });
   };
 
   // カテゴリの保存・削除
@@ -349,7 +374,7 @@ export default function App() {
                             <button className="row-btn" style={{ color: "#D0C8C0" }}
                               onMouseEnter={ev => ev.target.style.color = "#C4785A"}
                               onMouseLeave={ev => ev.target.style.color = "#D0C8C0"}
-                              onClick={() => delExpense(e.id)}>削除</button>
+                              onClick={() => askDeleteExpense(e)}>削除</button>
                           </div>
                         </div>
                       </div>
@@ -434,7 +459,7 @@ export default function App() {
                     <button className="row-btn" style={{ color: "#D0C8C0" }}
                       onMouseEnter={ev => { if (usedCount === 0) ev.target.style.color = "#C4785A"; }}
                       onMouseLeave={ev => ev.target.style.color = "#D0C8C0"}
-                      onClick={() => delCategory(c.id)}>削除</button>
+                      onClick={() => askDeleteCategory(c)}>削除</button>
                   </div>
                 </div>
               );
@@ -575,6 +600,30 @@ export default function App() {
                     <button onClick={submitCatForm} style={{ flex: 2, padding: "13px", borderRadius: 10, border: "none", background: "#2C2420", color: "#fff", fontFamily: "DM Sans", fontWeight: 600, fontSize: 15, cursor: "pointer", opacity: !catForm.label.trim() ? 0.45 : 1, transition: "opacity 0.15s" }}>{editingCatId ? "更新する" : "追加する"}</button>
                   </div>
                 </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Confirm Delete Modal */}
+        {confirmDialog && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(44,36,32,0.4)", zIndex: 300, display: "flex", alignItems: "flex-end", justifyContent: "center" }}
+            onClick={e => { if (e.target === e.currentTarget) setConfirmDialog(null); }}>
+            <div className="sheet" style={{ background: "#fff", borderRadius: "24px 24px 0 0", padding: "28px 20px 36px", width: "100%", maxWidth: 430, boxShadow: "0 -8px 40px rgba(44,36,32,0.12)" }}>
+              <div style={{ width: 36, height: 4, background: "#E8E0D8", borderRadius: 2, margin: "0 auto 22px" }} />
+              <div style={{ fontFamily: "DM Serif Display", fontSize: 22, color: "#2C2420", marginBottom: 14 }}>
+                {confirmDialog.kind === "category" ? <>このカテゴリを<em style={{ color: "#C4785A" }}>削除</em>しますか？</> : <>この記録を<em style={{ color: "#C4785A" }}>削除</em>しますか？</>}
+              </div>
+              <div style={{ background: "#F7F3EE", borderRadius: 12, padding: "14px 16px", border: "1px solid #E8E0D8", marginBottom: 14 }}>
+                <div style={{ fontWeight: 600, fontSize: 15, color: "#2C2420", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{confirmDialog.body}</div>
+                <div style={{ fontSize: 12, color: "#9A8E86", marginTop: 4 }}>{confirmDialog.sub}</div>
+              </div>
+              <div style={{ fontSize: 12, color: "#9A8E86", marginBottom: 18, lineHeight: 1.7 }}>
+                ✦ 削除すると元に戻せません
+              </div>
+              <div style={{ display: "flex", gap: 10 }}>
+                <button onClick={() => setConfirmDialog(null)} style={{ flex: 1, padding: "13px", borderRadius: 10, border: "1.5px solid #E8E0D8", background: "none", fontFamily: "DM Sans", fontWeight: 600, fontSize: 15, color: "#9A8E86", cursor: "pointer" }}>キャンセル</button>
+                <button onClick={() => { confirmDialog.onConfirm(); setConfirmDialog(null); }} style={{ flex: 1, padding: "13px", borderRadius: 10, border: "none", background: "#C4785A", color: "#fff", fontFamily: "DM Sans", fontWeight: 600, fontSize: 15, cursor: "pointer" }}>削除する</button>
               </div>
             </div>
           </div>
