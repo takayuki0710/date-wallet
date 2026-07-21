@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   collection, doc, setDoc, deleteDoc,
   onSnapshot, query, orderBy
@@ -32,8 +32,35 @@ const EMOJI_GROUPS = [
 ];
 
 const fmt = (n) => "¥" + Number(n).toLocaleString("ja-JP");
+const fmtShort = (n) => {
+  const abs = Math.abs(n);
+  if (abs >= 10000) {
+    const man = n / 10000;
+    return (n < 0 ? "-" : "") + Math.abs(man).toFixed(Number.isInteger(man) ? 0 : 1) + "万";
+  }
+  return (n < 0 ? "-¥" : "¥") + Math.abs(n).toLocaleString("ja-JP");
+};
 const EMPTY_FORM = { title: "", amount: "", category: "food", memo: "", date: new Date().toISOString().slice(0, 10), type: "expense" };
 const EMPTY_CAT_FORM = { label: "", emoji: "🍽", color: "#C4785A" };
+const BALANCE_RANGES = [
+  { id: "1m", label: "1ヶ月", months: 1 },
+  { id: "3m", label: "3ヶ月", months: 3 },
+  { id: "6m", label: "6ヶ月", months: 6 },
+  { id: "1y", label: "1年", months: 12 },
+  { id: "all", label: "全期間", months: null },
+];
+const pad2 = (n) => String(n).padStart(2, "0");
+const localDateStr = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const addDays = (dateStr, n) => {
+  const d = new Date(dateStr + "T00:00:00");
+  d.setDate(d.getDate() + n);
+  return localDateStr(d);
+};
+const monthsAgo = (dateStr, n) => {
+  const d = new Date(dateStr + "T00:00:00");
+  d.setMonth(d.getMonth() - n);
+  return localDateStr(d);
+};
 
 // Firestore のコレクション名（二人で共有する固定ID）
 const SHARED_ID = "shared";
@@ -52,6 +79,9 @@ export default function App() {
   const [editingCatId, setEditingCatId] = useState(null);
   const [catForm, setCatForm] = useState(EMPTY_CAT_FORM);
   const [confirmDialog, setConfirmDialog] = useState(null);
+  const [balanceRange, setBalanceRange] = useState("3m");
+  const [balanceHoverIdx, setBalanceHoverIdx] = useState(null);
+  const balanceSvgRef = useRef(null);
 
   // 認証状態を監視
   useEffect(() => {
@@ -189,6 +219,36 @@ export default function App() {
     acc[m].push(e);
     return acc;
   }, {});
+  const balanceSeries = (() => {
+    const todayStr = localDateStr(new Date());
+    if (expenses.length === 0) return { points: [], todayStr };
+    const sorted = [...expenses].sort((a, b) => a.date.localeCompare(b.date));
+    let running = 0;
+    const runningByDate = {};
+    sorted.forEach(e => {
+      running += e.type === "income" ? e.amount : -e.amount;
+      runningByDate[e.date] = running;
+    });
+    const firstDate = sorted[0].date;
+    const sortedDates = Object.keys(runningByDate).sort();
+    const selected = BALANCE_RANGES.find(r => r.id === balanceRange) || BALANCE_RANGES[1];
+    let startDate = selected.months == null ? firstDate : monthsAgo(todayStr, selected.months);
+    if (startDate > todayStr) startDate = todayStr;
+
+    let bal = 0;
+    sortedDates.forEach(dt => { if (dt <= startDate) bal = runningByDate[dt]; });
+
+    const points = [];
+    let cur = startDate;
+    let guard = 0;
+    while (cur <= todayStr && guard < 3660) {
+      if (runningByDate[cur] !== undefined) bal = runningByDate[cur];
+      points.push({ date: cur, balance: bal });
+      cur = addDays(cur, 1);
+      guard++;
+    }
+    return { points, todayStr };
+  })();
 
   const S = {
     input: { width: "100%", padding: "11px 14px", border: "1.5px solid #E8E0D8", borderRadius: 10, fontFamily: "DM Sans, sans-serif", fontSize: 15, background: "#F7F3EE", color: "#2C2420", outline: "none" },
@@ -433,6 +493,143 @@ export default function App() {
                 </div>
               </>
             )}
+
+            {expenses.length > 0 && (() => {
+              const { points } = balanceSeries;
+              const chartW = 320, chartH = 180;
+              const marginLeft = 52, marginRight = 8, marginTop = 12, marginBottom = 22;
+              const plotW = chartW - marginLeft - marginRight;
+              const plotH = chartH - marginTop - marginBottom;
+
+              const values = points.map(p => p.balance);
+              const domainMax = Math.max(...values, 0, 1);
+              const domainMin = Math.min(...values, 0);
+              const domainRange = domainMax - domainMin || 1;
+
+              const xAt = (i) => marginLeft + (points.length <= 1 ? plotW / 2 : (i / (points.length - 1)) * plotW);
+              const yAt = (v) => marginTop + plotH - ((v - domainMin) / domainRange) * plotH;
+
+              const linePoints = points.map((p, i) => `${xAt(i)},${yAt(p.balance)}`).join(" ");
+              const areaPoints = points.length > 0
+                ? `${marginLeft},${marginTop + plotH} ${linePoints} ${marginLeft + plotW},${marginTop + plotH}`
+                : "";
+
+              const yTickCount = 4;
+              const yTickValues = Array.from({ length: yTickCount + 1 }, (_, i) => domainMin + (domainRange * i) / yTickCount).reverse();
+
+              const xTickCount = Math.min(4, points.length);
+              const xTickIdxs = [...new Set(
+                xTickCount <= 1
+                  ? [0]
+                  : Array.from({ length: xTickCount }, (_, i) => Math.round((i * (points.length - 1)) / (xTickCount - 1)))
+              )];
+
+              const hoverIdx = balanceHoverIdx === null ? null : Math.max(0, Math.min(points.length - 1, balanceHoverIdx));
+              const hoverPoint = hoverIdx === null ? null : points[hoverIdx];
+
+              const updateHoverFromClientX = (clientX) => {
+                const svgEl = balanceSvgRef.current;
+                if (!svgEl || points.length === 0) return;
+                const rect = svgEl.getBoundingClientRect();
+                if (rect.width === 0) return;
+                const relX = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+                const svgX = relX * chartW;
+                const t = plotW > 0 ? (svgX - marginLeft) / plotW : 0;
+                const idx = Math.round(Math.max(0, Math.min(1, t)) * (points.length - 1));
+                setBalanceHoverIdx(idx);
+              };
+              const onSvgPointerDown = (e) => updateHoverFromClientX(e.clientX);
+              const onSvgPointerMove = (e) => updateHoverFromClientX(e.clientX);
+              const clearHover = () => setBalanceHoverIdx(null);
+
+              const tooltipW = 100, tooltipH = 34;
+              let tipX = 0, tipY = 0, hoverDateLabel = "", hoverBalanceLabel = "";
+              if (hoverPoint) {
+                const [hy, hm, hd] = hoverPoint.date.split("-");
+                hoverDateLabel = `${hy}年${Number(hm)}月${Number(hd)}日`;
+                hoverBalanceLabel = (hoverPoint.balance < 0 ? "−" : "") + fmt(Math.abs(hoverPoint.balance));
+                tipX = Math.max(marginLeft, Math.min(marginLeft + plotW - tooltipW, xAt(hoverIdx) - tooltipW / 2));
+                tipY = Math.max(marginTop - 2, yAt(hoverPoint.balance) - tooltipH - 10);
+              }
+
+              return (
+                <div style={{ marginTop: 20, background: "#fff", borderRadius: 16, padding: "20px", border: "1px solid #E8E0D8" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                    <div style={{ fontFamily: "DM Serif Display", fontSize: 16, color: "#2C2420" }}>Wallet Balance <em style={{ color: "#B5755A" }}>推移</em></div>
+                    <div style={{ fontFamily: "DM Serif Display", fontSize: 18, color: walletBalance >= 0 ? "#2C2420" : "#C4785A" }}>
+                      {walletBalance < 0 && <span style={{ fontSize: 13 }}>−</span>}{fmt(Math.abs(walletBalance))}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
+                    {BALANCE_RANGES.map(r => (
+                      <button key={r.id} onClick={() => setBalanceRange(r.id)} style={{
+                        padding: "4px 11px", borderRadius: 50,
+                        border: `1px solid ${balanceRange === r.id ? "#B5755A" : "#E8E0D8"}`,
+                        background: balanceRange === r.id ? "#B5755A" : "transparent",
+                        color: balanceRange === r.id ? "#fff" : "#9A8E86",
+                        fontFamily: "DM Sans", fontSize: 11, fontWeight: 500, cursor: "pointer",
+                      }}>{r.label}</button>
+                    ))}
+                  </div>
+                  {points.length < 2 ? (
+                    <div style={{ textAlign: "center", padding: "24px 0", color: "#9A8E86", fontSize: 13 }}>データが増えるとグラフが表示されます</div>
+                  ) : (
+                    <svg ref={balanceSvgRef} viewBox={`0 0 ${chartW} ${chartH}`} width="100%" height="180" preserveAspectRatio="none"
+                      style={{ display: "block", overflow: "visible", touchAction: "none", cursor: "crosshair" }}
+                      onPointerDown={onSvgPointerDown}
+                      onPointerMove={onSvgPointerMove}
+                      onPointerUp={clearHover}
+                      onPointerCancel={clearHover}
+                      onPointerLeave={clearHover}
+                    >
+                      <defs>
+                        <linearGradient id="balanceGrad" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor="#B5755A" stopOpacity="0.25" />
+                          <stop offset="100%" stopColor="#B5755A" stopOpacity="0" />
+                        </linearGradient>
+                      </defs>
+
+                      {yTickValues.map((v, i) => (
+                        <g key={i}>
+                          <line x1={marginLeft} y1={yAt(v)} x2={marginLeft + plotW} y2={yAt(v)}
+                            stroke={Math.abs(v) < domainRange * 0.001 ? "#D8CFC5" : "#EFEAE4"} strokeWidth="1"
+                            strokeDasharray={Math.abs(v) < domainRange * 0.001 ? "0" : "3 3"} />
+                          <text x={marginLeft - 6} y={yAt(v) + 3} textAnchor="end" fontSize="9" fill="#9A8E86" fontFamily="DM Sans">
+                            {fmtShort(Math.round(v))}
+                          </text>
+                        </g>
+                      ))}
+
+                      <line x1={marginLeft} y1={marginTop} x2={marginLeft} y2={marginTop + plotH} stroke="#D8CFC5" strokeWidth="1" />
+
+                      <polygon points={areaPoints} fill="url(#balanceGrad)" />
+                      <polyline points={linePoints} fill="none" stroke="#B5755A" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+
+                      {xTickIdxs.map(i => (
+                        <text key={i} x={xAt(i)} y={chartH - 4}
+                          textAnchor={i === 0 ? "start" : i === points.length - 1 ? "end" : "middle"}
+                          fontSize="9" fill="#9A8E86" fontFamily="DM Sans">
+                          {points[i].date.slice(5).replace("-", "/")}
+                        </text>
+                      ))}
+
+                      {hoverPoint && (
+                        <g>
+                          <line x1={xAt(hoverIdx)} y1={marginTop} x2={xAt(hoverIdx)} y2={marginTop + plotH}
+                            stroke="#B5755A" strokeWidth="1" strokeDasharray="3 3" opacity="0.6" />
+                          <circle cx={xAt(hoverIdx)} cy={yAt(hoverPoint.balance)} r="4" fill="#B5755A" stroke="#fff" strokeWidth="1.5" />
+                          <g transform={`translate(${tipX}, ${tipY})`}>
+                            <rect width={tooltipW} height={tooltipH} rx="8" fill="#2C2420" opacity="0.92" />
+                            <text x={tooltipW / 2} y="14" textAnchor="middle" fontSize="9" fill="#D8CFC5" fontFamily="DM Sans">{hoverDateLabel}</text>
+                            <text x={tooltipW / 2} y="27" textAnchor="middle" fontSize="12" fontWeight="700" fill="#fff" fontFamily="DM Sans">{hoverBalanceLabel}</text>
+                          </g>
+                        </g>
+                      )}
+                    </svg>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         )}
 
