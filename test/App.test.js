@@ -113,6 +113,22 @@ test("expenses arriving first also wait for recurring settings", async context =
   assert.equal(ctx.calls, 1);
 });
 
+test("turning an old paused subscription ON in settings does not bill the cancelled months", async context => {
+  setup();
+  const item = ctx.store.get("settings/recurring").items[0];
+  ctx.store.set("settings/recurring", { items: [{ ...item, startMonth: "2026-04", active: false }] });
+  await mount(); await push("settings/shared", "settings/recurring", "expenses");
+  await act(async () => button("設定").props.onClick());
+  const toggle = renderer.root.findByProps({ "aria-label": "定期0の自動計上" });
+  await act(async () => { await toggle.props.onClick(); await flush(); });
+  await tick(context, 600);
+  const resumed = ctx.store.get("settings/recurring").items[0];
+  assert.equal(resumed.active, true);
+  assert.equal(resumed.skipBeforeDate, "2026-10-05");
+  assert.equal(ctx.calls, 1);
+  assert.equal([...ctx.store.keys()].filter(key => key.startsWith("expenses/")).length, 0);
+});
+
 test("snapshot updates during a batch do not interrupt the remaining recurring expenses", async context => {
   setup(3); await mount(); await push("expenses", "settings/recurring"); await tick(context, 600);
   assert.equal(ctx.calls, 3);

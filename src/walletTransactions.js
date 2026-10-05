@@ -1,4 +1,4 @@
-import { normalizeRecurringForm, skipRecurringPeriod } from "./recurringExpenses.js";
+import { applyRecurringActivity, normalizeRecurringForm, skipRecurringPeriod } from "./recurringExpenses.js";
 import { placeCategory } from "./categoryOrder.js";
 
 export class WalletError extends Error {}
@@ -54,7 +54,7 @@ export const deleteExpenseRecord = async (transaction, { expenseRef, recurringRe
   return true;
 };
 
-export const saveRecurringTemplate = async (transaction, { recurringRef, categoriesRef, id, form, expected, defaults }) => {
+export const saveRecurringTemplate = async (transaction, { recurringRef, categoriesRef, id, form, expected, defaults, today = new Date() }) => {
   const [recurring, settings] = await Promise.all([transaction.get(recurringRef), transaction.get(categoriesRef)]);
   const items = recurring.data()?.items || [];
   const data = normalizeRecurringForm(form);
@@ -65,16 +65,20 @@ export const saveRecurringTemplate = async (transaction, { recurringRef, categor
     if (!current) throw new WalletError(missingMessage);
     assertUnchanged(normalizeRecurringForm(current) || {}, normalizeRecurringForm(expected) || {}, recurringFields);
   } else if (current) throw new WalletError(changedMessage);
-  const next = expected ? items.map(item => item.id === id ? { ...item, ...data } : item) : [...items, { id, ...data }];
+  const next = expected ? items.map(item => item.id === id ? { ...applyRecurringActivity(item, data.active, today), ...data } : item)
+    : [...items, { id, ...data, ...(!data.active ? { pausedAt: `${data.startMonth}-01` } : {}) }];
   transaction.set(recurringRef, { items: next }, { merge: true });
 };
 
-export const setRecurringActive = async (transaction, recurringRef, id, active) => {
+export const setRecurringActive = async (transaction, recurringRef, id, active, today = new Date()) => {
   const recurring = await transaction.get(recurringRef);
   const items = recurring.data()?.items || [];
-  if (!items.some(item => item.id === id)) throw new WalletError(missingMessage);
+  const current = items.find(item => item.id === id);
+  if (!current) throw new WalletError(missingMessage);
+  if (!!current.active === active) return false;
   // 二人が同時にOFFにしても、反転を二回行ってONに戻してしまいません。
-  transaction.set(recurringRef, { items: items.map(item => item.id === id ? { ...item, active } : item) }, { merge: true });
+  transaction.set(recurringRef, { items: items.map(item => item.id === id ? applyRecurringActivity(item, active, today) : item) }, { merge: true });
+  return true;
 };
 
 export const deleteRecurringTemplate = async (transaction, recurringRef, expected) => {

@@ -938,7 +938,7 @@ export default function App() {
               <div style={{ marginTop: 12, padding: "14px 16px", background: "#F0E6DF", borderRadius: 14, border: "1px solid rgba(181,117,90,0.2)", fontSize: 12, color: "#9A8E86", lineHeight: 1.8 }}>
                 🔁 アプリを開くと、開始月から計上日を迎えた未計上分が自動で記録されます<br />
                 ✦ 31日などがない月は、その月の末日に計上されます<br />
-                ✦ OFFで休止し、再開すると休止中の未計上分も記録されます<br />
+                ✦ OFF中に計上日を迎えた分は記録せず、再開日以降の計上日から記録します<br />
                 ✦ 「金額が毎月変わる」をONにすると、計上後に確認待ちで表示されます<br />
                 ✦ 金額確認前も、設定した金額が支出・残高に反映されます
               </div>

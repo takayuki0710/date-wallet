@@ -132,6 +132,74 @@ test("two simultaneous pause commands leave the template paused", { timeout: 450
   assert.equal(await post(clients[1], candidate(template())), false);
 });
 
+test("a six-month subscription cancellation never posts the cancelled months after resuming", { timeout: 45000 }, async () => {
+  const item = template({ startMonth: "2026-03" });
+  await seed([item], [record(item)]);
+  await perform(clients[0], tx => setRecurringActive(tx, refs(clients[0]).recurringRef, item.id, false, new Date(2026, 3, 1)));
+  await perform(clients[1], tx => setRecurringActive(tx, refs(clients[1]).recurringRef, item.id, true, new Date(2026, 9, 1)));
+  const resumed = (await stored(refs(clients[0]).recurringRef)).items[0];
+  assert.deepEqual(resumed.pausedRanges, [{ from: "2026-04-01", until: "2026-10-01" }]);
+  const pending = computePendingRecurringExpenses([resumed], await expenses(), today);
+  assert.deepEqual(pending.map(entry => entry.period), ["2026-10"]);
+  // 古い画面が休止中の月を候補にしていても、最新の共有設定で除外します。
+  for (const entry of computePendingRecurringExpenses([item], await expenses(), today).filter(entry => entry.period < "2026-10")) {
+    assert.equal(await post(clients[1], entry), false);
+  }
+  const results = await collide(clients.map(client => tx => post(client, pending[0], tx)));
+  assert.ok(results.every(result => result.status === "fulfilled"));
+  assert.deepEqual((await expenses()).map(expense => expense.recurringPeriod).sort(), ["2026-03", "2026-10"]);
+});
+
+test("two simultaneous resumes close one shared pause range exactly once", { timeout: 45000 }, async () => {
+  await seed([template({ active: false, pausedAt: "2026-04-01", skippedPeriods: ["2026-03"] })]);
+  const results = await collide(clients.map(client => tx => setRecurringActive(tx, refs(client).recurringRef, "subscription", true, new Date(2026, 9, 1))));
+  assert.ok(results.every(result => result.status === "fulfilled"));
+  assert.equal(results.filter(result => result.value === true).length, 1);
+  const resumed = (await stored(refs(clients[0]).recurringRef)).items[0];
+  assert.equal(resumed.active, true);
+  assert.equal(resumed.pausedAt, undefined);
+  assert.deepEqual(resumed.pausedRanges, [{ from: "2026-04-01", until: "2026-10-01" }]);
+  assert.deepEqual(resumed.skippedPeriods, ["2026-03"]);
+});
+
+test("editing the template to pause and resume uses the same period exclusion as the switch", async () => {
+  const item = template({ startMonth: "2026-03" });
+  await seed([item], [record(item)]);
+  const save = (client, expected, changes, date) => perform(client, tx => saveRecurringTemplate(tx, {
+    ...refs(client), id: item.id, expected, form: { ...expected, ...changes }, today: date,
+  }));
+  await save(clients[0], item, { active: false }, new Date(2026, 3, 1));
+  const paused = (await stored(refs(clients[0]).recurringRef)).items[0];
+  assert.equal(paused.pausedAt, "2026-04-01");
+  await save(clients[1], paused, { memo: "休止中の編集" }, new Date(2026, 6, 1));
+  const edited = (await stored(refs(clients[0]).recurringRef)).items[0];
+  assert.equal(edited.pausedAt, "2026-04-01");
+  await save(clients[0], edited, { active: true }, new Date(2026, 9, 1));
+  const resumed = (await stored(refs(clients[0]).recurringRef)).items[0];
+  assert.equal(resumed.memo, "休止中の編集");
+  assert.deepEqual(computePendingRecurringExpenses([resumed], await expenses(), today).map(entry => entry.period), ["2026-10"]);
+});
+
+test("legacy paused settings resume without creating any past unposted expense", async () => {
+  const item = template({ startMonth: "2026-03", active: false });
+  await seed([item]);
+  await perform(clients[0], tx => setRecurringActive(tx, refs(clients[0]).recurringRef, item.id, true, today));
+  const resumed = (await stored(refs(clients[1]).recurringRef)).items[0];
+  assert.deepEqual(computePendingRecurringExpenses([resumed], [], today), []);
+  assert.deepEqual(computePendingRecurringExpenses([resumed], [], new Date(2026, 10, 1)).map(entry => entry.period), ["2026-11"]);
+  const stale = candidate({ ...item, active: true });
+  assert.equal(await post(clients[1], stale), false);
+});
+
+test("a new template created OFF remains unbillable until its first resume", async () => {
+  await seed([]);
+  const form = template({ startMonth: "2026-03", active: false });
+  await perform(clients[0], tx => saveRecurringTemplate(tx, { ...refs(clients[0]), id: form.id, expected: null, form, today }));
+  await perform(clients[1], tx => setRecurringActive(tx, refs(clients[1]).recurringRef, form.id, true, new Date(2026, 9, 1)));
+  const resumed = (await stored(refs(clients[0]).recurringRef)).items[0];
+  assert.deepEqual(computePendingRecurringExpenses([resumed], [], today).map(entry => entry.period), ["2026-10"]);
+});
+
 test("a form opened before a pause cannot silently reactivate the template", async () => {
   const item = template();
   await seed();
