@@ -1,10 +1,21 @@
 import { useState, useEffect, useRef } from "react";
 import {
-  collection, doc, setDoc, deleteDoc,
-  onSnapshot, query, orderBy
+  collection, doc, onSnapshot, query, orderBy, where, getDocsFromServer, runTransaction
 } from "firebase/firestore";
 import { signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged } from "firebase/auth";
 import { db, auth, googleProvider } from "./firebase";
+import {
+  INTERVAL_OPTIONS, createRecurringForm, normalizeRecurringForm,
+  computePendingRecurringExpenses, postRecurringExpense,
+} from "./recurringExpenses";
+import { BALANCE_RANGES } from "./chartPreferences.js";
+import { useBalanceRange } from "./useBalanceRange.js";
+import CategoryList from "./CategoryList.jsx";
+import {
+  WalletError, saveExpense, confirmExpenseAmount, deleteExpenseRecord,
+  saveRecurringTemplate, setRecurringActive, deleteRecurringTemplate, saveCategory,
+  deleteCategory, moveCategory,
+} from "./walletTransactions.js";
 
 const DEFAULT_CATEGORIES = [
   { id: "food", label: "食事", emoji: "🍽", color: "#C4785A" },
@@ -42,13 +53,6 @@ const fmtShort = (n) => {
 };
 const EMPTY_FORM = { title: "", amount: "", category: "food", memo: "", date: new Date().toISOString().slice(0, 10), type: "expense" };
 const EMPTY_CAT_FORM = { label: "", emoji: "🍽", color: "#C4785A" };
-const BALANCE_RANGES = [
-  { id: "1m", label: "1ヶ月", months: 1 },
-  { id: "3m", label: "3ヶ月", months: 3 },
-  { id: "6m", label: "6ヶ月", months: 6 },
-  { id: "1y", label: "1年", months: 12 },
-  { id: "all", label: "全期間", months: null },
-];
 const pad2 = (n) => String(n).padStart(2, "0");
 const localDateStr = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 const addDays = (dateStr, n) => {
@@ -64,6 +68,8 @@ const monthsAgo = (dateStr, n) => {
 
 // Firestore のコレクション名（二人で共有する固定ID）
 const SHARED_ID = "shared";
+const RECURRING_ID = "recurring";
+const NEEDS_CONFIRM_COLOR = "#A08428";
 
 export default function App() {
   const [user, setUser] = useState(undefined); // undefined=loading, null=未ログイン
@@ -72,14 +78,35 @@ export default function App() {
   const [tab, setTab] = useState("home");
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
+  const [editingExpenseBase, setEditingExpenseBase] = useState(null);
   const [toast, setToast] = useState("");
   const [form, setForm] = useState(EMPTY_FORM);
   const [filterCat, setFilterCat] = useState("all");
   const [showCatForm, setShowCatForm] = useState(false);
   const [editingCatId, setEditingCatId] = useState(null);
+  const [editingCategoryBase, setEditingCategoryBase] = useState(null);
+  const [newCategoryPosition, setNewCategoryPosition] = useState("first");
   const [catForm, setCatForm] = useState(EMPTY_CAT_FORM);
   const [confirmDialog, setConfirmDialog] = useState(null);
-  const [balanceRange, setBalanceRange] = useState("3m");
+  const [recurringItems, setRecurringItems] = useState([]);
+  const [showRecForm, setShowRecForm] = useState(false);
+  const [editingRecId, setEditingRecId] = useState(null);
+  const [editingRecurringBase, setEditingRecurringBase] = useState(null);
+  const [recForm, setRecForm] = useState(() => createRecurringForm());
+  const [savingRecurring, setSavingRecurring] = useState(false);
+  const [onlyUnconfirmed, setOnlyUnconfirmed] = useState(false);
+  const [expensesUserId, setExpensesUserId] = useState(null);
+  const [recurringUserId, setRecurringUserId] = useState(null);
+  const postingIds = useRef(new Set());
+  const postingFailures = useRef(new Map());
+  const [postingRecurring, setPostingRecurring] = useState(false);
+  const [retryTick, setRetryTick] = useState(0);
+  const [savingExpense, setSavingExpense] = useState(false);
+  const savingExpenseRef = useRef(false);
+  const savingRecurringRef = useRef(false);
+  const savingCategoryRef = useRef(false);
+  const [savingCategory, setSavingCategory] = useState(false);
+  const [balanceRange, setBalanceRange] = useBalanceRange(db.app.options.projectId, user?.uid);
   const [balanceHoverIdx, setBalanceHoverIdx] = useState(null);
   const balanceSvgRef = useRef(null);
 
@@ -98,21 +125,110 @@ export default function App() {
 
   // Firestore からリアルタイムでデータ取得
   useEffect(() => {
+    setExpensesUserId(null);
+    setRecurringUserId(null);
+    setExpenses([]);
+    setRecurringItems([]);
+    setCategories(DEFAULT_CATEGORIES);
+    setShowForm(false);
+    setShowRecForm(false);
+    setShowCatForm(false);
+    setConfirmDialog(null);
+    postingFailures.current.clear();
     if (!user) return;
+    let active = true;
 
     const expQ = query(collection(db, "expenses"), orderBy("date", "desc"));
     const unsubExp = onSnapshot(expQ, (snap) => {
-      setExpenses(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      if (!active) return;
+      setExpenses(snap.docs.map(d => ({ ...d.data(), id: d.id })));
+      setExpensesUserId(user.uid);
+    }, error => {
+      if (!active) return;
+      setExpensesUserId(null);
+      console.error(error);
+      showToast("記録を読み込めませんでした");
     });
 
     const unsubCat = onSnapshot(doc(db, "settings", SHARED_ID), (snap) => {
+      if (!active) return;
       if (snap.exists() && snap.data().categories) {
         setCategories(snap.data().categories);
       }
     });
 
-    return () => { unsubExp(); unsubCat(); };
-  }, [user]);
+    const unsubRec = onSnapshot(doc(db, "settings", RECURRING_ID), (snap) => {
+      if (!active) return;
+      setRecurringItems(snap.data()?.items || []);
+      setRecurringUserId(user.uid);
+    }, (error) => {
+      if (!active) return;
+      setRecurringUserId(null);
+      console.error(error);
+      showToast("定期支出の設定を読み込めませんでした");
+    });
+
+    return () => { active = false; unsubExp(); unsubCat(); unsubRec(); };
+  }, [user?.uid]);
+
+  useEffect(() => {
+    const retry = () => { postingFailures.current.clear(); setRetryTick(tick => tick + 1); };
+    const onVisible = () => { if (document.visibilityState === "visible") retry(); };
+    window.addEventListener("online", retry);
+    document.addEventListener("visibilitychange", onVisible);
+    const timer = setInterval(() => setRetryTick(tick => tick + 1), 60000);
+    return () => { window.removeEventListener("online", retry); document.removeEventListener("visibilitychange", onVisible); clearInterval(timer); };
+  }, []);
+
+  const runWalletTransaction = operation => {
+    const ownerId = user?.uid;
+    return runTransaction(db, async transaction => {
+      if (!ownerId || auth.currentUser?.uid !== ownerId) throw new WalletError("ログイン状態が変更されました。画面を開き直してください");
+      const result = await operation(transaction);
+      if (auth.currentUser?.uid !== ownerId) throw new WalletError("ログイン状態が変更されました。画面を開き直してください");
+      return result;
+    });
+  };
+
+  // 両方の初回取得を待ち、共有相手との同時計上もトランザクションで防ぎます。
+  useEffect(() => {
+    if (!user || postingRecurring || expensesUserId !== user.uid || recurringUserId !== user.uid) return;
+    const ownerId = user.uid;
+    const timer = setTimeout(async () => {
+      const pending = computePendingRecurringExpenses(recurringItems, expenses).filter(entry =>
+        Date.now() - (postingFailures.current.get(entry.expId) || 0) >= 60000);
+      if (pending.length === 0 || auth.currentUser?.uid !== ownerId) return;
+      setPostingRecurring(true);
+      let posted = 0;
+      let failed = false;
+      for (const entry of pending) {
+        if (auth.currentUser?.uid !== ownerId) break;
+        if (postingIds.current.has(entry.expId)) continue;
+        postingIds.current.add(entry.expId);
+        try {
+          const created = await runWalletTransaction(transaction => postRecurringExpense(
+            transaction, doc(db, "settings", RECURRING_ID),
+            doc(db, "expenses", entry.expId), entry, new Date(),
+            { categoriesRef: doc(db, "settings", SHARED_ID), defaults: DEFAULT_CATEGORIES },
+          ));
+          if (created) posted++;
+        } catch (error) {
+          console.error(error);
+          if (auth.currentUser?.uid === ownerId) {
+            postingFailures.current.set(entry.expId, Date.now());
+            failed = true;
+          }
+        } finally {
+          postingIds.current.delete(entry.expId);
+        }
+      }
+      setPostingRecurring(false);
+      if (auth.currentUser?.uid !== ownerId) return;
+      if (failed) showToast("定期支出を計上できませんでした。接続回復後に再試行します");
+      else if (posted > 0) showToast(`🔁 ${posted}件の定期支出を計上しました`);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [user?.uid, expensesUserId, recurringUserId, recurringItems, expenses, postingRecurring, retryTick]);
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 1800); };
 
@@ -121,23 +237,49 @@ export default function App() {
 
   // 費用の保存・更新・削除
   const submitForm = async () => {
-    if (!form.amount) return;
+    if (!form.amount || savingExpenseRef.current) return;
+    savingExpenseRef.current = true;
     const title = form.title || fmt(Number(form.amount));
     const data = { ...form, title, amount: Number(form.amount) };
-    if (editingId) {
-      await setDoc(doc(db, "expenses", editingId), data);
-      showToast("✓ 更新しました");
-    } else {
-      const id = "exp_" + Date.now();
-      await setDoc(doc(db, "expenses", id), data);
-      showToast("✓ 記録しました");
+    setSavingExpense(true);
+    try {
+      const id = editingId || "exp_" + crypto.randomUUID();
+      await runWalletTransaction(transaction => saveExpense(transaction, {
+        expenseRef: doc(db, "expenses", id), categoriesRef: doc(db, "settings", SHARED_ID),
+        form: data, expected: editingId ? editingExpenseBase : null, defaults: DEFAULT_CATEGORIES,
+      }));
+      showToast(editingId ? "✓ 更新しました" : "✓ 記録しました");
+      setShowForm(false);
+    } catch (error) {
+      console.error(error);
+      showToast(error instanceof WalletError ? error.message : "記録を保存できませんでした");
+    } finally {
+      savingExpenseRef.current = false;
+      setSavingExpense(false);
     }
-    setShowForm(false);
   };
 
-  const delExpense = async (id) => {
-    await deleteDoc(doc(db, "expenses", id));
-    showToast("削除しました");
+  const delExpense = async (expected) => {
+    try {
+      await runWalletTransaction(transaction => deleteExpenseRecord(transaction, {
+        expenseRef: doc(db, "expenses", expected.id), recurringRef: doc(db, "settings", RECURRING_ID),
+        categoriesRef: doc(db, "settings", SHARED_ID), expected,
+      }));
+      showToast("削除しました");
+    } catch (error) {
+      console.error(error);
+      showToast(error instanceof WalletError ? error.message : "記録を削除できませんでした");
+    }
+  };
+
+  const confirmExpense = async (expected) => {
+    try {
+      await runWalletTransaction(transaction => confirmExpenseAmount(transaction, doc(db, "expenses", expected.id), expected));
+      showToast("✓ 確認しました");
+    } catch (error) {
+      console.error(error);
+      showToast(error instanceof WalletError ? error.message : "金額を確認済みにできませんでした");
+    }
   };
 
   const askDeleteExpense = (e) => {
@@ -146,12 +288,12 @@ export default function App() {
       title: "この記録を削除しますか？",
       body: e.title,
       sub: `${e.date.slice(5).replace("-", "/")}・${e.type === "income" ? "入金" : cat(e.category)?.label} ・ ${e.type === "income" ? "+" : ""}${fmt(e.amount)}`,
-      onConfirm: () => delExpense(e.id),
+      onConfirm: () => delExpense(e),
     });
   };
 
   const askDeleteCategory = (c) => {
-    if (expenses.some(e => e.category === c.id)) {
+    if (expenses.some(e => e.category === c.id) || recurringItems.some(r => r.category === c.id)) {
       showToast("使用中のカテゴリは削除できません");
       return;
     }
@@ -166,41 +308,133 @@ export default function App() {
 
   // カテゴリの保存・削除
   const submitCatForm = async () => {
-    if (!catForm.label.trim()) return;
-    let newCats;
-    if (editingCatId) {
-      newCats = categories.map(c => c.id === editingCatId ? { ...c, ...catForm } : c);
-      showToast("✓ カテゴリを更新しました");
-    } else {
-      newCats = [...categories, { id: "cat_" + Date.now(), ...catForm }];
-      showToast("✓ カテゴリを追加しました");
+    if (!catForm.label.trim() || savingCategoryRef.current) return;
+    savingCategoryRef.current = true;
+    setSavingCategory(true);
+    try {
+      const id = editingCatId || "cat_" + crypto.randomUUID();
+      await runWalletTransaction(transaction => saveCategory(transaction, {
+        categoriesRef: doc(db, "settings", SHARED_ID), id, form: catForm,
+        expected: editingCatId ? editingCategoryBase : null, defaults: DEFAULT_CATEGORIES,
+        position: newCategoryPosition,
+      }));
+      showToast(editingCatId ? "✓ カテゴリを更新しました" : "✓ カテゴリを追加しました");
+      setShowCatForm(false);
+    } catch (error) {
+      console.error(error);
+      showToast(error instanceof WalletError ? error.message : "カテゴリを保存できませんでした");
+    } finally {
+      savingCategoryRef.current = false;
+      setSavingCategory(false);
     }
-    await setDoc(doc(db, "settings", SHARED_ID), { categories: newCats });
-    setShowCatForm(false);
+  };
+
+  const reorderCategory = async (move) => {
+    try {
+      await runWalletTransaction(transaction => moveCategory(transaction, {
+        categoriesRef: doc(db, "settings", SHARED_ID), ...move, defaults: DEFAULT_CATEGORIES,
+      }));
+      return true;
+    } catch (error) {
+      console.error(error);
+      showToast(error instanceof WalletError ? error.message : "カテゴリの並び順を変更できませんでした");
+      return false;
+    }
   };
 
   const delCategory = async (id) => {
-    if (expenses.some(e => e.category === id)) {
+    if (expenses.some(e => e.category === id) || recurringItems.some(r => r.category === id)) {
       showToast("使用中のカテゴリは削除できません");
       return;
     }
-    const newCats = categories.filter(c => c.id !== id);
-    await setDoc(doc(db, "settings", SHARED_ID), { categories: newCats });
-    showToast("カテゴリを削除しました");
+    try {
+      await runWalletTransaction(transaction => deleteCategory(transaction, {
+        categoriesRef: doc(db, "settings", SHARED_ID), recurringRef: doc(db, "settings", RECURRING_ID),
+        id, defaults: DEFAULT_CATEGORIES,
+        loadExpenses: async () => {
+          const snapshot = await getDocsFromServer(query(collection(db, "expenses"), where("category", "==", id)));
+          return snapshot.docs.map(document => document.data());
+        },
+      }));
+      showToast("カテゴリを削除しました");
+    } catch (error) {
+      console.error(error);
+      showToast(error instanceof WalletError ? error.message : "カテゴリを削除できませんでした");
+    }
   };
 
-  const openAdd = () => { setEditingId(null); setForm(EMPTY_FORM); setShowForm(true); };
+  const submitRecForm = async () => {
+    const data = normalizeRecurringForm(recForm);
+    if (!data || !categories.some(c => c.id === data.category) || savingRecurringRef.current) return;
+    savingRecurringRef.current = true;
+    setSavingRecurring(true);
+    try {
+      const id = editingRecId || "rec_" + crypto.randomUUID();
+      await runWalletTransaction(transaction => saveRecurringTemplate(transaction, {
+        recurringRef: doc(db, "settings", RECURRING_ID), categoriesRef: doc(db, "settings", SHARED_ID),
+        id, form: data, expected: editingRecId ? editingRecurringBase : null, defaults: DEFAULT_CATEGORIES,
+      }));
+      showToast(editingRecId ? "✓ 定期支出を更新しました" : "✓ 定期支出を追加しました");
+      setShowRecForm(false);
+    } catch (error) {
+      console.error(error);
+      showToast(error instanceof WalletError ? error.message : "定期支出を保存できませんでした");
+    } finally {
+      savingRecurringRef.current = false;
+      setSavingRecurring(false);
+    }
+  };
+
+  const delRecurring = async (expected) => {
+    try {
+      await runWalletTransaction(transaction => deleteRecurringTemplate(transaction, doc(db, "settings", RECURRING_ID), expected));
+      showToast("定期支出を削除しました");
+    } catch (error) {
+      console.error(error);
+      showToast(error instanceof WalletError ? error.message : "定期支出を削除できませんでした");
+    }
+  };
+
+  const toggleRecurring = async (item) => {
+    try {
+      await runWalletTransaction(transaction => setRecurringActive(transaction, doc(db, "settings", RECURRING_ID), item.id, !item.active));
+    } catch (error) {
+      console.error(error);
+      showToast(error instanceof WalletError ? error.message : "定期支出の状態を変更できませんでした");
+    }
+  };
+
+  const askDeleteRecurring = (item) => {
+    setConfirmDialog({
+      kind: "recurring", body: item.title,
+      sub: `${cat(item.category).label} ・ ${fmt(item.amount)}`,
+      onConfirm: () => delRecurring(item),
+    });
+  };
+
+  const openAdd = () => { setEditingId(null); setEditingExpenseBase(null); setForm({ ...EMPTY_FORM, date: localDateStr(new Date()), category: categories[0]?.id || "food" }); setShowForm(true); };
   const openEdit = (e) => {
     setEditingId(e.id);
+    setEditingExpenseBase(e);
     setForm({ title: e.title, amount: String(e.amount), category: e.category, memo: e.memo || "", date: e.date, type: e.type || "expense" });
     setShowForm(true);
   };
-  const openAddCat = () => { setEditingCatId(null); setCatForm(EMPTY_CAT_FORM); setShowCatForm(true); };
-  const openEditCat = (c) => { setEditingCatId(c.id); setCatForm({ label: c.label, emoji: c.emoji, color: c.color }); setShowCatForm(true); };
+  const openAddCat = () => { setEditingCatId(null); setEditingCategoryBase(null); setNewCategoryPosition("first"); setCatForm(EMPTY_CAT_FORM); setShowCatForm(true); };
+  const openEditCat = (c) => { setEditingCatId(c.id); setEditingCategoryBase(c); setCatForm({ label: c.label, emoji: c.emoji, color: c.color }); setShowCatForm(true); };
+  const openAddRec = () => { setEditingRecId(null); setEditingRecurringBase(null); setRecForm(createRecurringForm(categories[0]?.id || "food")); setShowRecForm(true); };
+  const openEditRec = (item) => {
+    setEditingRecId(item.id);
+    setEditingRecurringBase(item);
+    setRecForm({ ...item, amount: String(item.amount), amountVaries: !!item.amountVaries });
+    setShowRecForm(true);
+  };
 
   const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
   const cat = (id) => categories.find(c => c.id === id) || { emoji: "✦", label: "不明", color: "#888" };
-  const filtered = filterCat === "all" ? expenses : expenses.filter(e => e.category === filterCat);
+  const categoryFiltered = filterCat === "all" ? expenses : expenses.filter(e => e.category === filterCat);
+  const filtered = onlyUnconfirmed ? categoryFiltered.filter(e => e.needsConfirmation) : categoryFiltered;
+  const unconfirmedCount = expenses.filter(e => e.needsConfirmation).length;
+  const validRecForm = !!normalizeRecurringForm(recForm) && categories.some(c => c.id === recForm.category);
   const monthlyAll = expenses.filter(e => e.date.slice(0, 7) === selectedMonth);
   const monthlyExpenses = monthlyAll.filter(e => (e.type || "expense") === "expense");
   const monthlyIncome = monthlyAll.filter(e => e.type === "income");
@@ -370,14 +604,29 @@ export default function App() {
               color: tab === id ? "#B5755A" : "#9A8E86",
               borderBottom: tab === id ? "2px solid #B5755A" : "2px solid transparent",
               transition: "all 0.2s",
-            }}>{label}</button>
+            }}>{label}{id === "home" && unconfirmedCount > 0 && (
+              <span style={{ marginLeft: 6, padding: "1px 5px", borderRadius: 8, background: NEEDS_CONFIRM_COLOR, color: "#fff", fontSize: 10 }}>{unconfirmedCount}</span>
+            )}</button>
           ))}
         </div>
 
         {/* HOME */}
         {tab === "home" && (
           <div>
+            {unconfirmedCount > 0 && !onlyUnconfirmed && (
+              <button onClick={() => { setOnlyUnconfirmed(true); setFilterCat("all"); }} style={{
+                display: "block", width: "calc(100% - 32px)", margin: "12px 16px 0", padding: "12px 14px",
+                borderRadius: 12, background: "#FAF4DF", border: "1px solid #D8C788", textAlign: "left",
+                fontFamily: "DM Sans", fontSize: 13, color: "#2C2420", cursor: "pointer", lineHeight: 1.6,
+              }}>🔁 {unconfirmedCount}件の金額確認待ちがあります <span style={{ color: NEEDS_CONFIRM_COLOR }}>確認する →</span></button>
+            )}
             <div style={{ padding: "12px 16px 12px", display: "flex", gap: 6, overflowX: "auto", borderBottom: "1px solid #E8E0D8" }}>
+              {onlyUnconfirmed && (
+                <button onClick={() => setOnlyUnconfirmed(false)} style={{
+                  flexShrink: 0, padding: "5px 14px", borderRadius: 50, border: `1.5px solid ${NEEDS_CONFIRM_COLOR}`,
+                  background: "#FAF4DF", color: NEEDS_CONFIRM_COLOR, fontFamily: "DM Sans", fontSize: 13, cursor: "pointer",
+                }}>要確認のみ ✕</button>
+              )}
               <button onClick={() => setFilterCat("all")} style={{
                 flexShrink: 0, padding: "5px 14px", borderRadius: 50,
                 border: `1.5px solid ${filterCat === "all" ? "#B5755A" : "#E8E0D8"}`,
@@ -399,8 +648,8 @@ export default function App() {
             {filtered.length === 0 ? (
               <div className="fade-in" style={{ textAlign: "center", padding: "64px 24px", color: "#9A8E86" }}>
                 <div style={{ fontFamily: "DM Serif Display", fontSize: 48, marginBottom: 12, opacity: 0.2 }}>✦</div>
-                <div style={{ fontWeight: 500, fontSize: 15, marginBottom: 6 }}>まだ記録がありません</div>
-                <div style={{ fontSize: 13 }}>下のボタンから追加してみてください</div>
+                <div style={{ fontWeight: 500, fontSize: 15, marginBottom: 6 }}>{onlyUnconfirmed ? "未確認の支出はありません" : "まだ記録がありません"}</div>
+                {!onlyUnconfirmed && <div style={{ fontSize: 13 }}>下のボタンから追加してみてください</div>}
               </div>
             ) : (
               <div style={{ padding: "8px 0" }}>
@@ -411,7 +660,7 @@ export default function App() {
                       <span>{fmt(items.filter(e => (e.type || "expense") === "expense").reduce((s, e) => s + e.amount, 0))}</span>
                     </div>
                     {items.map((e, i) => (
-                      <div key={e.id} className="fade-in" style={{ margin: "0 12px 6px", background: "#fff", borderRadius: 14, padding: "14px 16px", border: "1px solid #E8E0D8", display: "flex", alignItems: "center", gap: 14, animationDelay: `${i * 0.04}s` }}>
+                      <div key={e.id} className="fade-in" style={{ margin: "0 12px 6px", background: "#fff", borderRadius: 14, padding: "14px 16px", border: `1px solid ${e.needsConfirmation ? "#D8C788" : "#E8E0D8"}`, display: "flex", alignItems: "center", gap: 14, animationDelay: `${i * 0.04}s` }}>
                         <div style={{ width: 40, height: 40, borderRadius: 12, flexShrink: 0, background: e.type === "income" ? "#6B9E5A18" : `${cat(e.category)?.color}18`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>
                           {e.type === "income" ? "💰" : cat(e.category)?.emoji}
                         </div>
@@ -421,6 +670,8 @@ export default function App() {
                             <span>{e.date.slice(5).replace("-", "/")}</span>
                             {e.type !== "income" && <span style={{ color: cat(e.category)?.color, fontWeight: 500 }}>{cat(e.category)?.label}</span>}
                             {e.type === "income" && <span style={{ color: "#6B9E5A", fontWeight: 500 }}>入金</span>}
+                            {e.recurringId && <span title="定期支出">🔁</span>}
+                            {e.needsConfirmation && <span style={{ color: NEEDS_CONFIRM_COLOR, fontWeight: 600 }}>要確認</span>}
                             {e.memo && <span>— {e.memo}</span>}
                           </div>
                         </div>
@@ -429,6 +680,7 @@ export default function App() {
                             {e.type === "income" ? "+" : ""}{fmt(e.amount)}
                           </div>
                           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
+                            {e.needsConfirmation && <button className="row-btn" style={{ color: NEEDS_CONFIRM_COLOR }} onClick={() => confirmExpense(e)}>確認済み</button>}
                             <button className="row-btn" style={{ color: "#B5755A" }} onClick={() => openEdit(e)}>編集</button>
                             <span style={{ color: "#E8E0D8", fontSize: 12 }}>|</span>
                             <button className="row-btn" style={{ color: "#D0C8C0" }}
@@ -562,7 +814,7 @@ export default function App() {
                   </div>
                   <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
                     {BALANCE_RANGES.map(r => (
-                      <button key={r.id} onClick={() => setBalanceRange(r.id)} style={{
+                      <button key={r.id} aria-pressed={balanceRange === r.id} onClick={() => { setBalanceRange(r.id); setBalanceHoverIdx(null); }} style={{
                         padding: "4px 11px", borderRadius: 50,
                         border: `1px solid ${balanceRange === r.id ? "#B5755A" : "#E8E0D8"}`,
                         background: balanceRange === r.id ? "#B5755A" : "transparent",
@@ -640,30 +892,56 @@ export default function App() {
               <div style={{ fontFamily: "DM Serif Display", fontSize: 20, color: "#2C2420" }}>カテゴリ <em style={{ color: "#B5755A" }}>管理</em></div>
               <button onClick={openAddCat} style={{ background: "#2C2420", color: "#fff", border: "none", borderRadius: 50, padding: "8px 18px", fontFamily: "DM Sans", fontWeight: 600, fontSize: 13, cursor: "pointer" }}>+ 追加</button>
             </div>
-            {categories.map((c, i) => {
-              const usedCount = expenses.filter(e => e.category === c.id).length;
-              return (
-                <div key={c.id} className="fade-in" style={{ ...S.card, display: "flex", alignItems: "center", gap: 14, animationDelay: `${i * 0.04}s` }}>
-                  <div style={{ width: 42, height: 42, borderRadius: 12, background: `${c.color}22`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>{c.emoji}</div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 600, fontSize: 15, color: "#2C2420" }}>{c.label}</div>
-                    <div style={{ fontSize: 12, color: "#9A8E86", marginTop: 2 }}>{usedCount > 0 ? `${usedCount}件の記録` : "未使用"}</div>
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    <div style={{ width: 10, height: 10, borderRadius: "50%", background: c.color, marginRight: 8 }} />
-                    <button className="row-btn" style={{ color: "#B5755A" }} onClick={() => openEditCat(c)}>編集</button>
-                    <span style={{ color: "#E8E0D8", fontSize: 12, margin: "0 2px" }}>|</span>
-                    <button className="row-btn" style={{ color: "#D0C8C0" }}
-                      onMouseEnter={ev => { if (usedCount === 0) ev.target.style.color = "#C4785A"; }}
-                      onMouseLeave={ev => ev.target.style.color = "#D0C8C0"}
-                      onClick={() => askDeleteCategory(c)}>削除</button>
-                  </div>
-                </div>
-              );
-            })}
+            <CategoryList key={user.uid} categories={categories} expenses={expenses} recurringItems={recurringItems}
+              onMove={reorderCategory} onEdit={openEditCat} onDelete={askDeleteCategory} />
             <div style={{ marginTop: 16, padding: "14px 16px", background: "#F0E6DF", borderRadius: 14, border: "1px solid rgba(181,117,90,0.2)", fontSize: 12, color: "#9A8E86", lineHeight: 1.7 }}>
               ✦ 使用中のカテゴリは削除できません<br />
-              ✦ カテゴリ名・絵文字・カラーを自由に変更できます
+              ✦ カテゴリ名・絵文字・カラーを自由に変更できます<br />
+              ✦ 並び順は共有する全員の画面に反映されます
+            </div>
+
+            <div style={{ marginTop: 32 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                <div style={{ fontFamily: "DM Serif Display", fontSize: 20, color: "#2C2420" }}>定期支出 <em style={{ color: "#B5755A" }}>管理</em></div>
+                <button onClick={openAddRec} style={{ background: "#2C2420", color: "#fff", border: "none", borderRadius: 50, padding: "8px 18px", fontFamily: "DM Sans", fontWeight: 600, fontSize: 13, cursor: "pointer" }}>+ 追加</button>
+              </div>
+              {recurringItems.length === 0 ? (
+                <div style={{ padding: 20, textAlign: "center", color: "#9A8E86", fontSize: 13 }}>定期支出はまだありません</div>
+              ) : recurringItems.map((item, index) => {
+                const category = cat(item.category);
+                const intervalLabel = INTERVAL_OPTIONS.find(option => option.value === item.intervalMonths)?.label || `${item.intervalMonths}ヶ月ごと`;
+                return (
+                  <div key={item.id} className="fade-in" style={{ ...S.card, animationDelay: `${index * 0.04}s`, opacity: item.active ? 1 : 0.6 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      <div style={{ width: 42, height: 42, borderRadius: 12, background: `${category.color}22`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>{category.emoji}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 600, fontSize: 15, overflowWrap: "anywhere" }}>{item.title}</div>
+                        <div style={{ fontSize: 12, color: "#9A8E86", marginTop: 3, lineHeight: 1.6 }}>{fmt(item.amount)} ・ {intervalLabel} ・ {item.dayOfMonth}日</div>
+                        <div style={{ fontSize: 11, color: "#9A8E86", marginTop: 2 }}>{item.startMonth.replace("-", "年")}月から ・ {item.active ? "有効" : "休止中"}</div>
+                        {item.amountVaries && <span style={{ display: "inline-block", marginTop: 4, fontSize: 10, color: NEEDS_CONFIRM_COLOR, border: "1px solid #D8C788", borderRadius: 4, padding: "1px 4px" }}>金額変動</span>}
+                      </div>
+                      <button type="button" role="switch" aria-checked={item.active} aria-label={`${item.title}の自動計上`} onClick={() => toggleRecurring(item)} style={{
+                        width: 44, height: 24, borderRadius: 12, border: "none", padding: 0, cursor: "pointer", flexShrink: 0,
+                        background: item.active ? "#B5755A" : "#D0C8C0", position: "relative", transition: "background 0.2s",
+                      }}>
+                        <span style={{ position: "absolute", top: 2, left: item.active ? 22 : 2, width: 20, height: 20, borderRadius: "50%", background: "#fff", transition: "left 0.2s" }} />
+                      </button>
+                    </div>
+                    <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 10, paddingTop: 10, borderTop: "1px solid #E8E0D8" }}>
+                      <button className="row-btn" style={{ color: "#B5755A" }} onClick={() => openEditRec(item)}>編集</button>
+                      <span style={{ color: "#E8E0D8", fontSize: 12 }}>|</span>
+                      <button className="row-btn" style={{ color: "#9A8E86" }} onClick={() => askDeleteRecurring(item)}>削除</button>
+                    </div>
+                  </div>
+                );
+              })}
+              <div style={{ marginTop: 12, padding: "14px 16px", background: "#F0E6DF", borderRadius: 14, border: "1px solid rgba(181,117,90,0.2)", fontSize: 12, color: "#9A8E86", lineHeight: 1.8 }}>
+                🔁 アプリを開くと、開始月から計上日を迎えた未計上分が自動で記録されます<br />
+                ✦ 31日などがない月は、その月の末日に計上されます<br />
+                ✦ OFFで休止し、再開すると休止中の未計上分も記録されます<br />
+                ✦ 「金額が毎月変わる」をONにすると、計上後に確認待ちで表示されます<br />
+                ✦ 金額確認前も、設定した金額が支出・残高に反映されます
+              </div>
             </div>
           </div>
         )}
@@ -730,7 +1008,7 @@ export default function App() {
                 </div>
                 <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
                   <button onClick={() => setShowForm(false)} style={{ flex: 1, padding: "13px", borderRadius: 10, border: "1.5px solid #E8E0D8", background: "none", fontFamily: "DM Sans", fontWeight: 600, fontSize: 15, color: "#9A8E86", cursor: "pointer" }}>キャンセル</button>
-                  <button onClick={submitForm} style={{ flex: 2, padding: "13px", borderRadius: 10, border: "none", background: "#2C2420", color: "#fff", fontFamily: "DM Sans", fontWeight: 600, fontSize: 15, cursor: "pointer", opacity: !form.amount ? 0.45 : 1, transition: "opacity 0.15s" }}>{editingId ? "更新する" : "記録する"}</button>
+                  <button onClick={submitForm} disabled={savingExpense || !form.amount} style={{ flex: 2, padding: "13px", borderRadius: 10, border: "none", background: "#2C2420", color: "#fff", fontFamily: "DM Sans", fontWeight: 600, fontSize: 15, cursor: "pointer", opacity: savingExpense || !form.amount ? 0.45 : 1, transition: "opacity 0.15s" }}>{savingExpense ? "保存中..." : editingId ? "更新する" : "記録する"}</button>
                 </div>
               </div>
             </div>
@@ -761,6 +1039,15 @@ export default function App() {
                     <label style={S.label}>カテゴリ名<span style={{ color: "#C4785A" }}>*</span></label>
                     <input style={S.input} placeholder="例：温泉" value={catForm.label} onChange={e => setCatForm({ ...catForm, label: e.target.value })} autoFocus />
                   </div>
+                  {!editingCatId && (
+                    <div>
+                      <label htmlFor="category-position" style={S.label}>追加する位置</label>
+                      <select id="category-position" style={S.input} value={newCategoryPosition} onChange={event => setNewCategoryPosition(event.target.value)}>
+                        <option value="first">先頭（よく使うカテゴリ）</option>
+                        <option value="last">末尾</option>
+                      </select>
+                    </div>
+                  )}
                   <div>
                     <label style={S.label}>絵文字</label>
                     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -794,10 +1081,74 @@ export default function App() {
                   </div>
                   <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
                     <button onClick={() => setShowCatForm(false)} style={{ flex: 1, padding: "13px", borderRadius: 10, border: "1.5px solid #E8E0D8", background: "none", fontFamily: "DM Sans", fontWeight: 600, fontSize: 15, color: "#9A8E86", cursor: "pointer" }}>キャンセル</button>
-                    <button onClick={submitCatForm} style={{ flex: 2, padding: "13px", borderRadius: 10, border: "none", background: "#2C2420", color: "#fff", fontFamily: "DM Sans", fontWeight: 600, fontSize: 15, cursor: "pointer", opacity: !catForm.label.trim() ? 0.45 : 1, transition: "opacity 0.15s" }}>{editingCatId ? "更新する" : "追加する"}</button>
+                    <button onClick={submitCatForm} disabled={savingCategory || !catForm.label.trim()} style={{ flex: 2, padding: "13px", borderRadius: 10, border: "none", background: "#2C2420", color: "#fff", fontFamily: "DM Sans", fontWeight: 600, fontSize: 15, cursor: "pointer", opacity: savingCategory || !catForm.label.trim() ? 0.45 : 1, transition: "opacity 0.15s" }}>{savingCategory ? "保存中..." : editingCatId ? "更新する" : "追加する"}</button>
                   </div>
                 </div>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Recurring Expense Modal */}
+        {showRecForm && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(44,36,32,0.4)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center" }}
+            onClick={event => { if (event.target === event.currentTarget && !savingRecurring) setShowRecForm(false); }}>
+            <div className="sheet" role="dialog" aria-modal="true" aria-labelledby="recurring-modal-title" style={{ background: "#fff", borderRadius: "24px 24px 0 0", width: "100%", maxWidth: 430, maxHeight: "90dvh", display: "flex", flexDirection: "column", boxShadow: "0 -8px 40px rgba(44,36,32,0.12)" }}>
+              <div style={{ padding: "28px 20px 0", flexShrink: 0 }}>
+                <div style={{ width: 36, height: 4, background: "#E8E0D8", borderRadius: 2, margin: "0 auto 20px" }} />
+                <div id="recurring-modal-title" style={{ fontFamily: "DM Serif Display", fontSize: 22, marginBottom: 18 }}>
+                  定期支出を<em style={{ color: "#B5755A" }}>{editingRecId ? "編集" : "追加"}</em>
+                </div>
+              </div>
+              <form onSubmit={event => { event.preventDefault(); submitRecForm(); }} style={{ overflowY: "auto", padding: "0 20px 44px", flex: 1 }}>
+                <fieldset disabled={savingRecurring} style={{ border: "none", padding: 0, margin: 0, minWidth: 0, display: "flex", flexDirection: "column", gap: 16 }}>
+                  <div>
+                    <label htmlFor="recurring-title" style={S.label}>タイトル<span style={{ color: "#C4785A" }}>*</span></label>
+                    <input id="recurring-title" style={S.input} placeholder="例：サブスク" value={recForm.title} onChange={event => setRecForm({ ...recForm, title: event.target.value })} required autoFocus />
+                  </div>
+                  <div>
+                    <label htmlFor="recurring-amount" style={S.label}>金額（円）<span style={{ color: "#C4785A" }}>*</span></label>
+                    <input id="recurring-amount" style={S.input} type="text" inputMode="numeric" placeholder="0" value={recForm.amount ? Number(recForm.amount).toLocaleString("ja-JP") : ""} onChange={event => setRecForm({ ...recForm, amount: event.target.value.replace(/[^0-9]/g, "") })} required />
+                  </div>
+                  <div>
+                    <label htmlFor="recurring-category" style={S.label}>カテゴリ</label>
+                    <select id="recurring-category" style={S.input} value={recForm.category} onChange={event => setRecForm({ ...recForm, category: event.target.value })}>
+                      {categories.map(category => <option key={category.id} value={category.id}>{category.emoji} {category.label}</option>)}
+                    </select>
+                  </div>
+                  <div style={{ display: "flex", gap: 12 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <label htmlFor="recurring-day" style={S.label}>計上日</label>
+                      <select id="recurring-day" style={S.input} value={recForm.dayOfMonth} onChange={event => setRecForm({ ...recForm, dayOfMonth: Number(event.target.value) })}>
+                        {Array.from({ length: 31 }, (_, index) => index + 1).map(day => <option key={day} value={day}>{day}日</option>)}
+                      </select>
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <label htmlFor="recurring-interval" style={S.label}>頻度</label>
+                      <select id="recurring-interval" style={S.input} value={recForm.intervalMonths} onChange={event => setRecForm({ ...recForm, intervalMonths: Number(event.target.value) })}>
+                        {INTERVAL_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                  <div>
+                    <label htmlFor="recurring-start" style={S.label}>開始月</label>
+                    <input id="recurring-start" style={S.input} type="month" value={recForm.startMonth} onChange={event => setRecForm({ ...recForm, startMonth: event.target.value })} required />
+                    <div style={{ marginTop: 6, fontSize: 11, color: "#9A8E86", lineHeight: 1.6 }}>過去の月を指定すると、その月からの未計上分も追加されます。</div>
+                  </div>
+                  <div>
+                    <label htmlFor="recurring-memo" style={S.label}>メモ（任意）</label>
+                    <input id="recurring-memo" style={S.input} value={recForm.memo} onChange={event => setRecForm({ ...recForm, memo: event.target.value })} placeholder="メモを入力..." />
+                  </div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 10, border: `1.5px solid ${recForm.amountVaries ? "#D8C788" : "#E8E0D8"}`, background: recForm.amountVaries ? "#FAF4DF" : "transparent", cursor: "pointer" }}>
+                    <input type="checkbox" checked={recForm.amountVaries} onChange={event => setRecForm({ ...recForm, amountVaries: event.target.checked })} style={{ width: 17, height: 17, accentColor: NEEDS_CONFIRM_COLOR, flexShrink: 0 }} />
+                    <span style={{ fontSize: 13, lineHeight: 1.5 }}>金額が毎月変わる（計上後に金額を確認）</span>
+                  </label>
+                  <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+                    <button type="button" onClick={() => setShowRecForm(false)} style={{ flex: 1, padding: 13, borderRadius: 10, border: "1.5px solid #E8E0D8", background: "none", fontFamily: "DM Sans", fontWeight: 600, fontSize: 15, color: "#9A8E86", cursor: "pointer" }}>キャンセル</button>
+                    <button type="submit" disabled={!validRecForm || savingRecurring} style={{ flex: 2, padding: 13, borderRadius: 10, border: "none", background: "#2C2420", color: "#fff", fontFamily: "DM Sans", fontWeight: 600, fontSize: 15, cursor: "pointer", opacity: !validRecForm || savingRecurring ? 0.45 : 1 }}>{savingRecurring ? "保存中..." : editingRecId ? "更新する" : "追加する"}</button>
+                  </div>
+                </fieldset>
+              </form>
             </div>
           </div>
         )}
@@ -809,7 +1160,7 @@ export default function App() {
             <div className="sheet" style={{ background: "#fff", borderRadius: "24px 24px 0 0", padding: "28px 20px 36px", width: "100%", maxWidth: 430, boxShadow: "0 -8px 40px rgba(44,36,32,0.12)" }}>
               <div style={{ width: 36, height: 4, background: "#E8E0D8", borderRadius: 2, margin: "0 auto 22px" }} />
               <div style={{ fontFamily: "DM Serif Display", fontSize: 22, color: "#2C2420", marginBottom: 14 }}>
-                {confirmDialog.kind === "category" ? <>このカテゴリを<em style={{ color: "#C4785A" }}>削除</em>しますか？</> : <>この記録を<em style={{ color: "#C4785A" }}>削除</em>しますか？</>}
+                この{confirmDialog.kind === "category" ? "カテゴリ" : confirmDialog.kind === "recurring" ? "定期支出" : "記録"}を<em style={{ color: "#C4785A" }}>削除</em>しますか？
               </div>
               <div style={{ background: "#F7F3EE", borderRadius: 12, padding: "14px 16px", border: "1px solid #E8E0D8", marginBottom: 14 }}>
                 <div style={{ fontWeight: 600, fontSize: 15, color: "#2C2420", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{confirmDialog.body}</div>
@@ -817,6 +1168,7 @@ export default function App() {
               </div>
               <div style={{ fontSize: 12, color: "#9A8E86", marginBottom: 18, lineHeight: 1.7 }}>
                 ✦ 削除すると元に戻せません
+                {confirmDialog.kind === "recurring" && <><br />✦ 計上済みの記録は残ります</>}
               </div>
               <div style={{ display: "flex", gap: 10 }}>
                 <button onClick={() => setConfirmDialog(null)} style={{ flex: 1, padding: "13px", borderRadius: 10, border: "1.5px solid #E8E0D8", background: "none", fontFamily: "DM Sans", fontWeight: 600, fontSize: 15, color: "#9A8E86", cursor: "pointer" }}>キャンセル</button>

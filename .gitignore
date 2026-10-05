@@ -3,3 +3,6 @@ dist
 .env
 .env.local
 .claude/
+*-debug.log
+firebase-debug.log.*
+REQUESTS.txt
